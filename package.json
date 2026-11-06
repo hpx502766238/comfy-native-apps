@@ -1,0 +1,17 @@
+{
+  "name": "comfy-native-apps",
+  "version": "1.0.0",
+  "description": "A 6-tool MCP server that runs ComfyUI's native .app.json workflow apps and manages the render queue, with zero plugin dependency.",
+  "type": "module",
+  "bin": {
+    "comfy-native-apps": "comfy_native_apps.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "comfy_native_apps.mjs",
+    "native_lib.mjs"
+  ],
+  "license": "MIT"
+}
