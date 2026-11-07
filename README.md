@@ -1,6 +1,6 @@
 # comfy-native-apps
 
-[中文文档](README.zh-CN.md)
+[中文文档](README.zh-CN.md)  |  [MCP 客户端配置示例](MCP-CONFIG.zh-CN.md)
 
 A 6-tool MCP server that drives **only** ComfyUI's native `.app.json` apps (the
 built-in "构建应用 / Build App" feature) and manages the render queue. It does the
