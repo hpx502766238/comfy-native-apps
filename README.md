@@ -15,7 +15,7 @@ Node 18+ only (global `fetch`, `structuredClone`). No `npm install`.
 artokun's comfyui-mcp exposes ~38 action-parameterized tools (plus 3 facade meta-tools
 and a 96-tool panel surface). Even its compact mode forces a `list → describe_tool →
 call_tool` chain that a 9B-class local model loops on `describe_tool` forever. This
-server deletes the indirection: the model sees exactly six single-purpose tools.
+server deletes the indirection: the model sees exactly seven single-purpose tools.
 
 ## Tools
 
@@ -23,6 +23,7 @@ server deletes the indirection: the model sees exactly six single-purpose tools.
 |------|--------------|
 | `list_apps` | every native `.app.json` app, with its input params (name + type + default) and outputs |
 | `run_app(app, values)` | fill only the params you change, convert UI→API, enqueue, wait, return the image (and any string outputs) |
+| `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
 | `queue_status` | what is running + pending |
 | `job_status(prompt_id)` | state + output files of one job |
 | `clear_queue` | clear the pending queue |
@@ -31,6 +32,7 @@ server deletes the indirection: the model sees exactly six single-purpose tools.
 `run_app` `app` may be the number from `list_apps`, the app name, or its id (relative
 workflows path). `values` keys are the friendly param labels (`prompt`, `seed`, …).
 A `seed` of `-1` rolls a random seed.
+For apps with an image/video/audio/mask input: first call `upload_file` with a local path, then pass the returned **ComfyUI-side relative path** (e.g. `mybatch/wall.png`) as that param value in `run_app` - ComfyUI reads it from its input dir, not the Windows filesystem, so absolute paths like `E:/.../wall.png` wont resolve.
 
 ## How a native app is read
 
