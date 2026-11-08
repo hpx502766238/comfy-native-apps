@@ -279,14 +279,24 @@ export function listApps() {
 
 export function resolveAppRef(ref) {
   const { apps } = listApps();
-  const ok = apps.filter((a) => !a.error);
+  // Numbering matches list_apps: EVERY app gets a sequential number (bad apps too),
+  // so a model that read list_apps and says "11" gets #11 here, never shifted.
   const n = Number(ref);
-  if (Number.isInteger(n) && n >= 1 && n <= ok.length) return ok[n - 1];
+  if (Number.isInteger(n) && n >= 1 && n <= apps.length) {
+    const a = apps[n - 1];
+    if (a.error) throw new Error(`app #${n} is unreadable: ${a.error}`);
+    return a;
+  }
   if (/^\d+$/.test(String(ref))) {
     const i = Number(ref);
-    if (i >= 1 && i <= ok.length) return ok[i - 1];
-    throw new Error(`app #${ref} out of range (1..${ok.length})`);
+    if (i >= 1 && i <= apps.length) {
+      const a = apps[i - 1];
+      if (a.error) throw new Error(`app #${i} is unreadable: ${a.error}`);
+      return a;
+    }
+    throw new Error(`app #${ref} out of range (1..${apps.length})`);
   }
+  const ok = apps.filter((a) => !a.error);
   const r = String(ref).trim();
   const byId = ok.find((a) => a.id === r);
   if (byId) return byId;
@@ -297,12 +307,8 @@ export function resolveAppRef(ref) {
   const lower = r.toLowerCase();
   const fuzzy = ok.find((a) => a.name.toLowerCase() === lower);
   if (fuzzy) return fuzzy;
-  throw new Error(`no app named "${ref}" — available: ${ok.map((a) => a.name).join(', ') || '(none)'}`);
+  throw new Error(`no app named "${ref}" - available: ${ok.map((a) => a.name).join(', ') || '(none)'}`);
 }
-
-// --------------------------------------------------------------------------- #
-// ComfyUI core HTTP (no deps; global fetch). Stable across headless + frontend modes.
-// --------------------------------------------------------------------------- #
 export async function postPrompt(graph) {
   const r = await fetch(BASE + '/prompt', {
     method: 'POST',
