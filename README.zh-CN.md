@@ -8,7 +8,7 @@ ComfyUI原生应用工作流轻量执行器MCP，适合小模型
 
 ## 为什么
 
-artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3 个门面元工具和 96 个面板接口）。即使是它的紧凑模式，也会逼着模型走 `list → describe_tool → call_tool` 这条链，而 9B 级别的本地模型会在 `describe_tool` 上无限打转。这个服务器把中间层删掉：模型只看到 6 个单一用途的工具。
+artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3 个门面元工具和 96 个面板接口）。即使是它的紧凑模式，也会逼着模型走 `list → describe_tool → call_tool` 这条链，而 9B 级别的本地模型会在 `describe_tool` 上无限打转。这个服务器把中间层删掉：模型只看到 7 个单一用途的工具。
 
 ## 工具
 
@@ -16,12 +16,14 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 |------|------|
 | `list_apps` | 列出所有原生 `.app.json` 应用，含输入参数（名称 + 类型 + 默认值）和输出 |
 | `run_app(app, values)` | 只填你要改的参数，做 UI→API 转换，入队，等待，返回图片（以及任何字符串输出） |
+| `upload_file(path, subfolder?)` | 把本地文件（图片/视频/音频/mask）上传进 ComfyUI 的 input 目录；返回可在 `run_app` 的输入参数里直接使用的 ComfyUI 侧相对路径 |
 | `queue_status` | 正在运行 + 排队的任务 |
 | `job_status(prompt_id)` | 单个任务的状态 + 输出文件 |
 | `clear_queue` | 清空排队中的任务 |
 | `interrupt` | 停止当前生成 |
 
 `run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）。`values` 的键是友好的参数标签（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
+有图片/视频/音频/mask 输入的应用：先调用 `upload_file`（给本地文件路径），再把返回的 **ComfyUI 侧相对路径**（如 `mybatch/wall.png`）作为该输入参数的值传给 `run_app` —— ComfyUI 是从它的 input 目录读文件的，不是从 Windows 文件系统，所以 `E:/.../wall.png` 这种绝对路径解析不到。
 
 ## 原生应用是如何被读取的
 
