@@ -13,6 +13,9 @@
 //                                     input params to fill (label + type) and outputs
 //   run_app(app, values)           -> fill only the params you want to change,
 //                                     convert UI→API, enqueue, wait, return the image
+//   upload_file(path, subfolder)   -> upload a LOCAL file (image/video/audio/mask)
+//                                     into ComfyUI's input dir; returns the
+//                                     ComfyUI-side relative path for run_app values
 //   queue_status()                 -> what is running + pending in the queue
 //   job_status(prompt_id)          -> state + output files of one job
 //   clear_queue()                  -> clear the pending queue
@@ -28,7 +31,7 @@
 import {
   BASE, RUN_TIMEOUT_S, listApps, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,
-  getQueue, jobStatus, postJson,
+  getQueue, jobStatus, postJson, uploadFile,
 } from './native_lib.mjs';
 
 const PROTOCOL_VERSION = '2024-11-05';
@@ -58,6 +61,21 @@ const TOOLS = [
         },
       },
       required: ['app'],
+    },
+  },
+  {
+    name: 'upload_file',
+    description: 'Upload a local file (image / video / audio / mask — anything a ComfyUI input can load) into ' +
+      'the ComfyUI input folder, so it can be referenced by run_app. Give the LOCAL path to the file on this ' +
+      'machine; optionally a subfolder name. Returns the ComfyUI-side relative path to pass as the value of ' +
+      'an image/video/audio/mask input param.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute (or relative) path to the LOCAL file to upload, e.g. "C:/pics/my photo.png" or "D:/vids/clip.mp4".' },
+        subfolder: { type: 'string', description: 'Optional destination subfolder inside the ComfyUI input dir (no leading/trailing slash).'},
+      },
+      required: ['path'],
     },
   },
   {
@@ -91,6 +109,11 @@ const TOOLS = [
 // --------------------------------------------------------------------------- #
 function listAppsHandler() {
   return JSON.stringify(listApps(), null, 2);
+}
+
+async function uploadFileHandler({ path: localPath, subfolder }) {
+  const r = await uploadFile(localPath, subfolder);
+  return [{ type: 'text', text: JSON.stringify(r, null, 2) }];
 }
 
 async function runAppHandler({ app, values = {} }) {
@@ -137,6 +160,7 @@ function handle(msg) {
       switch (name) {
         case 'list_apps': return [{ type: 'text', text: listAppsHandler() }];
         case 'run_app': return runAppHandler(args);
+        case 'upload_file': return uploadFileHandler(args);
         case 'queue_status': return [{ type: 'text', text: JSON.stringify(await getQueue(), null, 2) }];
         case 'job_status': return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id), null, 2) }];
         case 'clear_queue': { const r = await postJson('/queue', { clear: true }); return [{ type: 'text', text: JSON.stringify(r) }]; }
