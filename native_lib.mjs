@@ -329,6 +329,24 @@ export async function postJson(p, body) {
   return t ? JSON.parse(t) : { ok: true };
 }
 
+// Upload a LOCAL file (image/video/audio/mask — anything you can load from the
+// input dir) into ComfyUI's /upload/ dir. Multipart like the frontend's Upload.
+// `subfolder` is relative to the input dir (e.g. "mybatch"); the returned path
+// ("mybatch/name") is exactly what a LoadImage / LoadAudio / LoadVideo / Load
+// Mask input expects in run_app values.
+export async function uploadFile(localPath, subfolder = '') {
+  const abs = path.resolve(localPath);
+  if (!fs.existsSync(abs)) throw new Error(`file not found: ${localPath}`);
+  const name = path.basename(abs);
+  const form = new FormData();
+  form.append('image', new Blob([fs.readFileSync(abs)]), name);
+  if (subfolder) form.append('subfolder', subfolder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''));
+  const r = await fetch(BASE + '/upload/image', { method: 'POST', body: form });
+  if (!r.ok) throw new Error(`ComfyUI /upload/image HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const j = await r.json();
+  return { name: j.name ?? name, subfolder: j.subfolder ?? '', type: j.type ?? 'input', path: ((j.subfolder ? j.subfolder + '/' : '') + (j.name ?? name)).replace(/\\/g, '/') };
+}
+
 export async function getBytes(p) {
   const r = await fetch(BASE + p);
   if (!r.ok) throw new Error(`ComfyUI ${p} HTTP ${r.status}`);
