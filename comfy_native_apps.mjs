@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// comfy-native-apps — a 6-tool MCP server for small (9B-class) local models.
+// comfy-native-apps — an MCP server for small (9B-class) local models.
 // Runs ComfyUI's NATIVE workflow apps (.app.json) and manages the render queue.
 //
 // It drives ONLY ComfyUI's NATIVE ".app.json" apps (the built-in "构建应用" feature)
@@ -7,31 +7,36 @@
 // frontend ComfyUI, with ZERO dependency on the artokun comfyui-mcp / panel plugin.
 //
 // Tools (no list_tools / describe_tool / call_tool indirection — the model sees
-// exactly these six, each single-purpose):
+// exactly these, each single-purpose):
 //
 //   list_apps()                    -> every native .app.json app, with the exact
 //                                     input params to fill (label + type) and outputs
 //   run_app(app, values)           -> fill only the params you want to change,
-//                                     convert UI→API, enqueue, wait, return the image
+//                                     convert UI→API, enqueue, wait, return the
+//                                     image (or the saved video path)
 //   upload_file(path, subfolder)   -> upload a LOCAL file (image/video/audio/mask)
 //                                     into ComfyUI's input dir; returns the
 //                                     ComfyUI-side relative path for run_app values
+//   download_output(prompt_id, index?) -> client-reachable /view URL for one
+//                                     finished output (+ local path if readable)
 //   queue_status()                 -> what is running + pending in the queue
 //   job_status(prompt_id)          -> state + output files of one job
 //   clear_queue()                  -> clear the pending queue
 //   interrupt()                    -> stop the current generation
 //
-// Config (env vars): COMFYUI_HOST (127.0.0.1), COMFYUI_PORT (8188),
-//   WORKFLOWS_ROOT (auto-detected), RUN_TIMEOUT_S (300).
+// Config (env vars): COMFYUI_URL (http://127.0.0.1:8188),
+//   COMFYUI_PUBLIC_URL (URL clients use for download links; defaults to
+//   COMFYUI_URL), WORKFLOWS_ROOT (auto-detected), RUN_TIMEOUT_S (300).
+//   Legacy COMFYUI_HOST + COMFYUI_PORT still work as a fallback.
 //
 // Client config (Claude Code / any MCP client):
 //   { "command": "node",
 //     "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
-//     "env": { "COMFYUI_PORT": "8188" } }
+//     "env": { "COMFYUI_URL": "http://127.0.0.1:8188" } }
 import {
   BASE, RUN_TIMEOUT_S, listApps, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,
-  getQueue, jobStatus, postJson, uploadFile,
+  getQueue, jobStatus, postJson, uploadFile, downloadOutput,
 } from './native_lib.mjs';
 
 const PROTOCOL_VERSION = '2024-11-05';
@@ -102,6 +107,19 @@ const TOOLS = [
     description: 'Interrupt the currently running generation, if any.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
+  {
+    name: 'download_output',
+    description: 'Get a client-reachable download URL (and, when the file is on this machine, its path) for a finished ' +
+      'job. Only needs the prompt_id returned by run_app or job_status. Works the same for local and remote ComfyUI.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or job_status.' },
+        index: { type: 'integer', description: 'Which output to take when the job wrote several. Defaults to 0.', minimum: 0 },
+      },
+      required: ['prompt_id'],
+    },
+  },
 ];
 
 // --------------------------------------------------------------------------- #
@@ -116,6 +134,11 @@ async function uploadFileHandler({ path: localPath, subfolder }) {
   return [{ type: 'text', text: JSON.stringify(r, null, 2) }];
 }
 
+async function downloadOutputHandler(args) {
+  const r = await downloadOutput(args);
+  return [{ type: 'text', text: JSON.stringify(r, null, 2) }];
+}
+
 async function runAppHandler({ app, values = {} }) {
   const ref = resolveAppRef(app);
   const a = loadNativeApp(ref.file);
@@ -127,12 +150,20 @@ async function runAppHandler({ app, values = {} }) {
   const out = await collectOutputs(entry);
 
   if (out.kind === 'image') {
-    const lines = [`Generated ${out.filename} with app "${a.name}".`, `(prompt_id ${promptId})`];
+    const lines = [`Generated ${out.filename} with app "${a.name}".`, `URL: ${out.url}`];
+    if (out.path) lines.push(`Path: ${out.path}`);
+    lines.push(`(prompt_id ${promptId})`);
     if (out.extra?.length) lines.push('', 'Other outputs:', ...out.extra);
     return [
       { type: 'text', text: lines.join('\n') },
       { type: 'image', data: out.b64, mimeType: out.mime },
     ];
+  }
+  if (out.kind === 'video') {
+    const lines = [`App "${a.name}" finished (prompt_id ${promptId}).`, `Video: ${out.url}`];
+    if (out.path) lines.push(`Path: ${out.path}`);
+    if (out.extra?.length) lines.push('', 'Other outputs:', ...out.extra);
+    return [{ type: 'text', text: lines.join('\n') }];
   }
   const lines = [`App "${a.name}" finished (prompt_id ${promptId}).`, out.text];
   if (out.extra?.length) lines.push('', 'Other outputs:', ...out.extra);
@@ -161,6 +192,7 @@ function handle(msg) {
         case 'list_apps': return [{ type: 'text', text: listAppsHandler() }];
         case 'run_app': return runAppHandler(args);
         case 'upload_file': return uploadFileHandler(args);
+        case 'download_output': return downloadOutputHandler(args);
         case 'queue_status': return [{ type: 'text', text: JSON.stringify(await getQueue(), null, 2) }];
         case 'job_status': return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id), null, 2) }];
         case 'clear_queue': { const r = await postJson('/queue', { clear: true }); return [{ type: 'text', text: JSON.stringify(r) }]; }
