@@ -18,13 +18,14 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 | `run_app(app, values)` | 只填你要改的参数，做 UI→API 转换，入队，等待，返回图片（以及任何字符串输出）；视频返回可直接打开的 `/view` 链接 |
 | `upload_file(path, subfolder?)` | 把本地文件（图片/视频/音频/mask）上传进 ComfyUI 的 input 目录；返回可在 `run_app` 的输入参数里直接使用的 ComfyUI 侧相对路径 |
 | `download_output(prompt_id, index?)` | 按 `prompt_id` 取一条已完成产物的下载链接（本地实例还会附上真实路径）；本地 / 远程 ComfyUI 通用 |
-| `queue_status` | 正在运行 + 排队的任务 |
+| `queue_status` | 正在运行 + 排队的任务，附带最近完成任务的 `recent` 列表（默认 5 条，`recent: 0` 只看队列） |
 | `job_status(prompt_id)` | 单个任务的状态 + 输出文件 |
 | `clear_queue` | 清空排队中的任务 |
 | `interrupt` | 停止当前生成 |
 
 `run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）。`values` 的键是友好的参数标签（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
+`queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
 有图片/视频/音频/mask 输入的应用：先调用 `upload_file`（给本地文件路径），再把返回的 **ComfyUI 侧相对路径**（如 `mybatch/wall.png`）作为该输入参数的值传给 `run_app` —— ComfyUI 是从它的 input 目录读文件的，不是从 Windows 文件系统，所以 `E:/.../wall.png` 这种绝对路径解析不到。
 
 ## 原生应用是如何被读取的
