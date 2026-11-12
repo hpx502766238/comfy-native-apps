@@ -11,22 +11,23 @@
 //
 //   list_apps()                    -> every native .app.json app, with the exact
 //                                     input params to fill (label + type) and outputs
-//   run_app(app, values)           -> fill only the params you want to change,
+//   run_app(app, values, wait_s?)  -> fill only the params you want to change,
 //                                     convert UI→API, enqueue, wait, return the
-//                                     image (or the saved video path)
+//                                     image (or the video URL); wait_s: 0 = submit only
 //   upload_file(path, subfolder)   -> upload a LOCAL file (image/video/audio/mask)
 //                                     into ComfyUI's input dir; returns the
 //                                     ComfyUI-side relative path for run_app values
-//   download_output(prompt_id, index?) -> client-reachable /view URL for one
-//                                     finished output (+ local path if readable)
+//   download_output(prompt_id, index?, dest?) -> download one finished output to a
+//                                     local file (file or dir dest); works remote too
 //   queue_status(recent?)         -> what is running + pending, plus recent finished jobs
-//   job_status(prompt_id)          -> state + output files of one job
+//   job_status(prompt_id, wait_s?) -> state + output files of one job; wait_s blocks
 //   clear_queue()                  -> clear the pending queue
 //   interrupt()                    -> stop the current generation
 //
 // Config (env vars): COMFYUI_URL (http://127.0.0.1:8188),
 //   COMFYUI_PUBLIC_URL (URL clients use for download links; defaults to
-//   COMFYUI_URL), WORKFLOWS_ROOT (auto-detected), RUN_TIMEOUT_S (300).
+//   COMFYUI_URL), WORKFLOWS_ROOT (auto-detected), RUN_TIMEOUT_S (300),
+//   DOWNLOAD_DIR (default <cwd>/downloads).
 //   Legacy COMFYUI_HOST + COMFYUI_PORT still work as a fallback.
 //
 // Client config (Claude Code / any MCP client):
@@ -51,10 +52,10 @@ const TOOLS = [
   },
   {
     name: 'run_app',
-    description: 'Run one app: fill its input params and generate. Returns the finished image. ' +
-      'Pass app as its number from list_apps, its name, or its id. ' +
+    description: 'Run one app: fill its input params and generate. Waits for the job and returns the finished image ' +
+      '(or the video URL). Pass app as its number from list_apps, its name, or its id. ' +
       'Pass only the params you want to change; omitted ones keep their defaults. ' +
-      'A seed of -1 rolls a random seed.',
+      'A seed of -1 rolls a random seed. Set wait_s to 0 to enqueue and return the prompt_id immediately.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,6 +64,10 @@ const TOOLS = [
           type: 'object',
           description: 'Params to fill. Keys are the param name shown by list_apps (e.g. "prompt", "seed"). Omit any you want to leave at its default.',
           additionalProperties: true,
+        },
+        wait_s: {
+          type: 'integer', minimum: 0, maximum: 3600,
+          description: 'Seconds to block waiting for the result. Defaults to the server RUN_TIMEOUT_S. 0 = submit and return prompt_id at once.',
         },
       },
       required: ['app'],
@@ -97,10 +102,14 @@ const TOOLS = [
   {
     name: 'job_status',
     description: 'Report the state (running / pending / completed / error) and output files of one job. ' +
-      'Pass the UUID prompt_id returned by run_app. While a job is still queued, its queue number also works.',
+      'Pass the UUID prompt_id returned by run_app. While a job is still queued, its queue number also works. ' +
+      'Set wait_s to block until the job finishes (or the budget runs out) instead of polling.',
     inputSchema: {
       type: 'object',
-      properties: { prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or seen in queue_status.' } },
+      properties: {
+        prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or seen in queue_status.' },
+        wait_s: { type: 'integer', minimum: 0, maximum: 3600, description: 'Block until the job finishes, up to this many seconds. Defaults to 0 (return at once).' },
+      },
       required: ['prompt_id'],
     },
   },
@@ -116,13 +125,16 @@ const TOOLS = [
   },
   {
     name: 'download_output',
-    description: 'Get a client-reachable download URL (and, when the file is on this machine, its path) for a finished ' +
-      'job. Only needs the prompt_id returned by run_app or job_status. Works the same for local and remote ComfyUI.',
+    description: 'Download one finished output to a local file. Only needs the prompt_id returned by run_app or job_status; ' +
+      'filename comes from ComfyUI history, so it works for local and remote ComfyUI alike. ' +
+      'dest is a file path or a directory (relative paths resolve against the MCP server working dir); ' +
+      'omit it to use $DOWNLOAD_DIR, else <cwd>/downloads.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or job_status.' },
         index: { type: 'integer', description: 'Which output to take when the job wrote several. Defaults to 0.', minimum: 0 },
+        dest: { type: 'string', description: 'Local destination: a file ("E:/out/clip.mp4"), a directory ("E:/out" or "out/"), or a relative path. Omit for the default downloads folder.' },
       },
       required: ['prompt_id'],
     },
@@ -146,14 +158,47 @@ async function downloadOutputHandler(args) {
   return [{ type: 'text', text: JSON.stringify(r, null, 2) }];
 }
 
-async function runAppHandler({ app, values = {} }) {
+async function runAppHandler({ app, values = {}, wait_s }) {
   const ref = resolveAppRef(app);
   const a = loadNativeApp(ref.file);
   const overrides = buildOverrides(a, values);
   const prompt = graphToPrompt(a, overrides);
   const resp = await postPrompt(prompt);
   const promptId = resp.prompt_id;
-  const entry = await waitForJob(promptId);
+
+  const waitS = wait_s === undefined || wait_s === null || wait_s === ''
+    ? RUN_TIMEOUT_S
+    : Math.max(0, Number(wait_s) || 0);
+
+  // wait_s: 0 → submit only; the client decides later with job_status(wait_s).
+  if (waitS === 0) {
+    const st = await jobStatus(promptId);
+    return [{
+      type: 'text',
+      text: JSON.stringify({
+        ...st,
+        hint: 'Job submitted. Call job_status with this prompt_id and wait_s to block for the result.',
+      }, null, 2),
+    }];
+  }
+
+  let entry;
+  try {
+    entry = await waitForJob(promptId, waitS);
+  } catch (e) {
+    if (e.code !== 'TIMEOUT') throw e;
+    const st = await jobStatus(promptId);
+    return [{
+      type: 'text',
+      text: JSON.stringify({
+        ...st,
+        timed_out: true,
+        waited_s: waitS,
+        hint: 'Still not finished. Call job_status with this prompt_id and wait_s to keep waiting, then download_output.',
+      }, null, 2),
+    }];
+  }
+
   const out = await collectOutputs(entry);
 
   if (out.kind === 'image') {
@@ -204,7 +249,10 @@ function handle(msg) {
           const recent = Math.min(Math.max(Number(args.recent ?? 5) || 0, 0), 50);
           return [{ type: 'text', text: JSON.stringify(await getQueue({ recent }), null, 2) }];
         }
-        case 'job_status': return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id), null, 2) }];
+        case 'job_status': {
+          const waitS = Math.min(Math.max(Number(args.wait_s ?? 0) || 0, 0), 3600);
+          return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id, { waitS }), null, 2) }];
+        }
         case 'clear_queue': { const r = await postJson('/queue', { clear: true }); return [{ type: 'text', text: JSON.stringify(r) }]; }
         case 'interrupt': { const r = await postJson('/interrupt', {}); return [{ type: 'text', text: JSON.stringify(r) }]; }
         default: throw new Error(`Unknown tool: ${name}`);
