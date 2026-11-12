@@ -19,7 +19,7 @@
 //                                     ComfyUI-side relative path for run_app values
 //   download_output(prompt_id, index?) -> client-reachable /view URL for one
 //                                     finished output (+ local path if readable)
-//   queue_status()                 -> what is running + pending in the queue
+//   queue_status(recent?)         -> what is running + pending, plus recent finished jobs
 //   job_status(prompt_id)          -> state + output files of one job
 //   clear_queue()                  -> clear the pending queue
 //   interrupt()                    -> stop the current generation
@@ -85,8 +85,14 @@ const TOOLS = [
   },
   {
     name: 'queue_status',
-    description: 'Show what is currently running and pending in the ComfyUI queue.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
+    description: 'Show the ComfyUI queue: what is running and pending now, plus the last few finished jobs (recent, newest first).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        recent: { type: 'integer', description: 'How many finished jobs to list in "recent". Defaults to 5, use 0 to skip history.', minimum: 0, maximum: 50 },
+      },
+      required: [],
+    },
   },
   {
     name: 'job_status',
@@ -194,7 +200,10 @@ function handle(msg) {
         case 'run_app': return runAppHandler(args);
         case 'upload_file': return uploadFileHandler(args);
         case 'download_output': return downloadOutputHandler(args);
-        case 'queue_status': return [{ type: 'text', text: JSON.stringify(await getQueue(), null, 2) }];
+        case 'queue_status': {
+          const recent = Math.min(Math.max(Number(args.recent ?? 5) || 0, 0), 50);
+          return [{ type: 'text', text: JSON.stringify(await getQueue({ recent }), null, 2) }];
+        }
         case 'job_status': return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id), null, 2) }];
         case 'clear_queue': { const r = await postJson('/queue', { clear: true }); return [{ type: 'text', text: JSON.stringify(r) }]; }
         case 'interrupt': { const r = await postJson('/interrupt', {}); return [{ type: 'text', text: JSON.stringify(r) }]; }

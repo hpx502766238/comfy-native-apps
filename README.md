@@ -25,7 +25,7 @@ server deletes the indirection: the model sees exactly eight single-purpose tool
 | `run_app(app, values)` | fill only the params you change, convert UI→API, enqueue, wait, return the image (and any string outputs); videos come back as an openable `/view` URL |
 | `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
 | `download_output(prompt_id, index?)` | download URL for one finished output, by the `prompt_id` from `run_app` / `job_status`; also returns a real local path when the instance is local |
-| `queue_status` | what is running + pending |
+| `queue_status` | what is running + pending, plus a `recent` list of finished jobs (5 by default; `recent: 0` skips history) |
 | `job_status(prompt_id)` | state + output files of one job |
 | `clear_queue` | clear the pending queue |
 | `interrupt` | stop the current generation |
@@ -34,6 +34,7 @@ server deletes the indirection: the model sees exactly eight single-purpose tool
 workflows path). `values` keys are the friendly param labels (`prompt`, `seed`, …).
 A `seed` of `-1` rolls a random seed.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
+`queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
 For apps with an image/video/audio/mask input: first call `upload_file` with a local path, then pass the returned **ComfyUI-side relative path** (e.g. `mybatch/wall.png`) as that param value in `run_app` - ComfyUI reads it from its input dir, not the Windows filesystem, so absolute paths like `E:/.../wall.png` wont resolve.
 
 ## How a native app is read

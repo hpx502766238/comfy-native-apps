@@ -672,8 +672,31 @@ export async function collectOutputs(entry) {
 // --------------------------------------------------------------------------- #
 // Queue monitoring.
 // --------------------------------------------------------------------------- #
-async function getQueue() {
-  const q = await getJson('/queue');
+// One finished job from /history, kept small enough for a small model to read.
+function summarizeHistory(promptId, e) {
+  const msgs = e?.status?.messages ?? [];
+  const stamp = (name) => msgs.find((m) => m?.[0] === name)?.[1]?.timestamp;
+  const finished = stamp('execution_success') ?? stamp('execution_error') ?? stamp('execution_interrupted');
+  const outputs = Object.values(e?.outputs ?? {})
+    .flatMap((o) => Object.values(o ?? {}))
+    .flat()
+    .filter((x) => x && typeof x === 'object' && x.filename)
+    .map((x) => (x.subfolder ? `${x.subfolder}/${x.filename}` : x.filename));
+  return {
+    prompt_id: promptId,
+    state: e?.status?.status_str === 'error' ? 'error' : 'completed',
+    outputs,
+    ...(finished ? { finished_at: new Date(finished).toISOString() } : {}),
+  };
+}
+
+// recent > 0 also reads that many finished jobs from /history. jobStatus() leaves
+// it at 0 so polling a job does not re-download history on every call.
+async function getQueue({ recent = 0 } = {}) {
+  const [q, hist] = await Promise.all([
+    getJson('/queue'),
+    recent > 0 ? getJson(`/history?max_items=${recent}`).catch(() => ({})) : null,
+  ]);
   // ComfyUI queue entries are [queue_number, prompt_id, prompt, extra_data,
   // outputs_to_execute]. Very old builds sent [prompt_id, prompt, outputs].
   // Normalize both shapes and never confuse the queue number with the prompt_id.
@@ -690,7 +713,14 @@ async function getQueue() {
       class_types: classTypes,
     };
   });
-  return { running: slim(q.queue_running), pending: slim(q.queue_pending) };
+  const out = { running: slim(q.queue_running), pending: slim(q.queue_pending) };
+  if (hist) {
+    // /history is ordered oldest -> newest; the model wants newest first.
+    out.recent = Object.entries(hist).slice(-recent)
+      .map(([id, e]) => summarizeHistory(id, e))
+      .reverse();
+  }
+  return out;
 }
 export { getQueue };
 
