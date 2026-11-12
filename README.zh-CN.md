@@ -15,17 +15,19 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 | 工具 | 作用 |
 |------|------|
 | `list_apps` | 列出所有原生 `.app.json` 应用，含输入参数（名称 + 类型 + 默认值）和输出 |
-| `run_app(app, values)` | 只填你要改的参数，做 UI→API 转换，入队，等待，返回图片（以及任何字符串输出）；视频返回可直接打开的 `/view` 链接 |
+| `run_app(app, values, wait_s?)` | 只填你要改的参数，做 UI→API 转换，入队并等待，返回图片（以及任何字符串输出）；视频返回可直接打开的 `/view` 链接。`wait_s` 是本次最多阻塞多少秒，`0` 表示只入队、立刻返回 `prompt_id` |
 | `upload_file(path, subfolder?)` | 把本地文件（图片/视频/音频/mask）上传进 ComfyUI 的 input 目录；返回可在 `run_app` 的输入参数里直接使用的 ComfyUI 侧相对路径 |
-| `download_output(prompt_id, index?)` | 按 `prompt_id` 取一条已完成产物的下载链接（本地实例还会附上真实路径）；本地 / 远程 ComfyUI 通用 |
+| `download_output(prompt_id, index?, dest?)` | 把已完成产物**下载到本地文件**（`/view` 取字节后落盘），返回真实路径 `saved_to`。`dest` 可以是文件、目录或相对路径；省略则用 `DOWNLOAD_DIR`（默认 `<cwd>/downloads`）。本地 / 远程 ComfyUI 通用 |
 | `queue_status` | 正在运行 + 排队的任务，附带最近完成任务的 `recent` 列表（默认 5 条，`recent: 0` 只看队列） |
-| `job_status(prompt_id)` | 单个任务的状态 + 输出文件 |
+| `job_status(prompt_id, wait_s?)` | 单个任务的状态 + 输出文件；`wait_s` 让它阻塞到任务结束（或超时），不用客户端自己轮询 |
 | `clear_queue` | 清空排队中的任务 |
 | `interrupt` | 停止当前生成 |
 
 `run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）。`values` 的键是友好的参数标签（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
 `queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
+**下载**：`download_output` 会把文件真正写到本地（从 `/view` 取字节），返回 `saved_to`。`dest` 传文件路径（`E:/out/clip.mp4`，可顺便改名）、目录（`E:/out`、`E:/out/`，没有扩展名也按目录处理）或相对路径（相对 MCP 进程的 cwd）；省略则写到 `DOWNLOAD_DIR`。文件落在 **MCP 服务端所在机器**，远程 ComfyUI 也一样。
+**等待**：`run_app` 默认会阻塞到出结果；`wait_s: 0` 只入队并立刻返回 `prompt_id`。之后用 `job_status(prompt_id, wait_s)` 阻塞最多 N 秒，超时会返回 `timed_out: true` 和当前 `state`，再调一次即可接着等，不会靠猜客户端超时。
 有图片/视频/音频/mask 输入的应用：先调用 `upload_file`（给本地文件路径），再把返回的 **ComfyUI 侧相对路径**（如 `mybatch/wall.png`）作为该输入参数的值传给 `run_app` —— ComfyUI 是从它的 input 目录读文件的，不是从 Windows 文件系统，所以 `E:/.../wall.png` 这种绝对路径解析不到。
 
 ## 原生应用是如何被读取的
@@ -52,6 +54,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 | `COMFYUI_PUBLIC_URL` | 等于 `COMFYUI_URL` | 客户端访问 ComfyUI 的地址；仅当 MCP 主机能连、客户端连不上时（容器 / 反代 / 隧道）才需要设置，用于生成下载链接 |
 | `WORKFLOWS_ROOT` | 自动探测的 `<ComfyUI user>` 目录（递归找 `workflows/**\/*.app.json`） | ComfyUI `user` 目录 |
 | `RUN_TIMEOUT_S` | `300`（等待一次渲染的秒数） | 单次渲染等待上限 |
+| `DOWNLOAD_DIR` | `<MCP 进程工作目录>/downloads` | `download_output` 未给 `dest` 时的落盘目录，可设成固定文件夹 |
 
 > 旧写法 `COMFYUI_HOST` + `COMFYUI_PORT` 仍然兼容，但已被 `COMFYUI_URL` 取代。
 

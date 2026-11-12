@@ -564,10 +564,32 @@ async function localPathOf(it) {
   return fs.existsSync(full) ? full : null;
 }
 
-// Resolve one finished output by prompt_id (+ index when a job wrote several)
-// and return a client-reachable /view URL. Everything (filename, subfolder,
-// type) comes from /history, so callers never need to know ComfyUI's layout.
-export async function downloadOutput({ prompt_id, index = 0 }) {
+function viewQuery(it) {
+  return `filename=${encodeURIComponent(it.filename)}` +
+    (it.subfolder ? `&subfolder=${encodeURIComponent(it.subfolder)}` : '') +
+    `&type=${encodeURIComponent(it.type ?? 'output')}`;
+}
+
+// Where a download lands. dest may be a file, a directory, or absent:
+//   "E:/out/clip.mp4"  → that file
+//   "E:/out/"          → E:/out/clip.mp4        (no extension → treated as a dir too)
+//   "clips"            → <cwd>/clips/clip.mp4
+//   omitted            → $DOWNLOAD_DIR/clip.mp4, else <cwd>/downloads/clip.mp4
+function resolveDest(dest, filename) {
+  let raw = String(dest ?? '').trim() || process.env.DOWNLOAD_DIR || path.join(process.cwd(), 'downloads');
+  if (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')) raw = path.join(os.homedir(), raw.slice(1));
+  const full = path.resolve(raw);
+  const isDir = /[\\/]$/.test(raw) ||
+    (fs.existsSync(full) && fs.statSync(full).isDirectory()) ||
+    !path.extname(full);
+  return isDir ? path.join(full, filename) : full;
+}
+
+// Resolve one finished output by prompt_id (+ index when a job wrote several),
+// fetch its bytes over /view and write them to a local file. Writing through
+// HTTP (instead of copying the server-side path) is what makes it work for a
+// remote ComfyUI: the file lands on the machine running THIS MCP server.
+export async function downloadOutput({ prompt_id, index = 0, dest }) {
   if (!prompt_id) throw new Error('prompt_id is required');
   if (/^\d+$/.test(String(prompt_id).trim())) {
     throw new Error(`"${prompt_id}" is a queue number, not a prompt_id. Use the UUID returned by run_app (e.g. "24700a6f-…").`);
@@ -586,38 +608,20 @@ export async function downloadOutput({ prompt_id, index = 0 }) {
   const i = Math.max(0, Number(index) || 0);
   const it = items[i];
   if (!it) throw new Error(`index ${index} out of range: job ${prompt_id} has ${items.length} output(s)`);
-  const out = {
+
+  const savedTo = resolveDest(dest, it.filename);
+  const bytes = await getBytes(`/view?${viewQuery(it)}`);
+  fs.mkdirSync(path.dirname(savedTo), { recursive: true });
+  fs.writeFileSync(savedTo, bytes);
+
+  return {
     prompt_id,
     index: i,
     filename: it.filename,
-    subfolder: it.subfolder ?? '',
-    type: it.type ?? 'output',
+    saved_to: savedTo,
+    bytes: bytes.length,
     url: outputViewUrl(it),
   };
-  const local = await localPathOf(it);
-  if (local) out.path = local;
-  return out;
-}
-
-// Poll /history/<pid> until done, error, or timeout.
-export async function waitForJob(promptId) {
-  const deadline = Date.now() + RUN_TIMEOUT_S * 1000;
-  while (Date.now() < deadline) {
-    const hist = await getJson(`/history/${promptId}`).catch(() => ({}));
-    const entry = hist[promptId];
-    if (entry) {
-      const status = entry.status ?? {};
-      if (status.status_str === 'error') {
-        const msgs = (status.messages ?? [])
-          .filter((mm) => Array.isArray(mm) && mm[0] === 'execution_error')
-          .map((mm) => (mm[1]?.exception_message ?? mm[1] ?? 'execution error'));
-        throw new Error('ComfyUI error: ' + (msgs.join('; ') || 'unknown'));
-      }
-      if (status.completed || entry.outputs) return entry;
-    }
-    await new Promise((res) => setTimeout(res, 2000));
-  }
-  throw new Error(`render not finished within ${RUN_TIMEOUT_S}s (prompt_id ${promptId})`);
 }
 
 // Resolve ComfyUI's output dir so we can report a full path the user can open.
@@ -724,17 +728,22 @@ async function getQueue({ recent = 0 } = {}) {
 }
 export { getQueue };
 
-export async function jobStatus(promptId) {
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+// One non-blocking look at a job: queue first, then history. Also resolves a
+// queue number shorthand while the job is still queued.
+async function inspectJob(promptId) {
   let id = String(promptId ?? '').trim();
   const q = await getQueue();
-  // A bare number is a queue position, not a prompt_id. Accept it as a shorthand
-  // while the job is still queued, then continue with the real UUID.
   if (/^\d+$/.test(id)) {
     const hit = [...q.running, ...q.pending].find((e) => String(e.queue_number) === id);
     if (hit) id = hit.prompt_id;
   }
-  if (q.running.some((e) => e.prompt_id === id)) return { prompt_id: id, state: 'running' };
-  if (q.pending.some((e) => e.prompt_id === id)) return { prompt_id: id, state: 'pending' };
+  const running = q.running.find((e) => e.prompt_id === id);
+  if (running) return { prompt_id: id, state: 'running', queue_number: running.queue_number };
+  const pending = q.pending.find((e) => e.prompt_id === id);
+  if (pending) return { prompt_id: id, state: 'pending', queue_number: pending.queue_number };
+
   const hist = await getJson(`/history/${id}`).catch(() => ({}));
   const e = hist[id];
   if (!e) {
@@ -744,8 +753,48 @@ export async function jobStatus(promptId) {
       hint: 'Use the UUID returned by run_app. A queue number only works while the job is queued; history is cleared after a ComfyUI restart.',
     };
   }
-  if (e.status?.status_str === 'error') return { prompt_id: id, state: 'error', error: e.status.messages?.find((m) => m?.[0] === 'execution_error')?.[1]?.exception_message };
+  if (e.status?.status_str === 'error') {
+    const error = e.status.messages?.find((m) => m?.[0] === 'execution_error')?.[1]?.exception_message ?? 'execution error';
+    return { prompt_id: id, state: 'error', error, entry: e };
+  }
   const outs = Object.entries(e.outputs ?? {})
     .flatMap(([nid, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ node: nid, key: k, filename: x.filename, subfolder: x.subfolder ?? '', type: x.type ?? 'output' }))));
-  return { prompt_id: id, state: 'completed', outputs: outs };
+  return { prompt_id: id, state: 'completed', outputs: outs, entry: e };
+}
+
+// Block until the job is no longer running/pending, or the budget runs out.
+// `entry` (raw /history entry) stays on the result for internal callers.
+async function waitForFinal(promptId, waitS) {
+  const started = Date.now();
+  const budget = Math.max(0, Number(waitS) || 0) * 1000;
+  const deadline = started + budget;
+  for (;;) {
+    const st = await inspectJob(promptId);
+    if (st.state === 'completed' || st.state === 'error' || st.state === 'unknown') return st;
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      return { ...st, timed_out: true, waited_s: Math.round((Date.now() - started) / 1000) };
+    }
+    await sleep(Math.min(1000, left));
+  }
+}
+
+// External shape: never leak the full prompt graph back to the model.
+export async function jobStatus(promptId, { waitS = 0 } = {}) {
+  const st = waitS > 0 ? await waitForFinal(promptId, waitS) : await inspectJob(promptId);
+  const { entry, ...rest } = st;
+  return rest;
+}
+
+// Used by run_app: returns the raw /history entry, throws on error or timeout.
+export async function waitForJob(promptId, timeoutS = RUN_TIMEOUT_S) {
+  const st = await waitForFinal(promptId, timeoutS);
+  if (st.state === 'error') throw new Error(`ComfyUI error: ${st.error ?? 'execution error'}`);
+  if (st.state === 'unknown') throw new Error(`no history for prompt_id ${st.prompt_id} (unknown, or cleared by ComfyUI)`);
+  if (st.timed_out) {
+    const err = new Error(`render not finished within ${timeoutS}s (prompt_id ${st.prompt_id}, state ${st.state})`);
+    err.code = 'TIMEOUT';
+    throw err;
+  }
+  return st.entry;
 }

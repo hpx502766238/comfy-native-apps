@@ -22,11 +22,11 @@ server deletes the indirection: the model sees exactly eight single-purpose tool
 | tool | what it does |
 |------|--------------|
 | `list_apps` | every native `.app.json` app, with its input params (name + type + default) and outputs |
-| `run_app(app, values)` | fill only the params you change, convert UI→API, enqueue, wait, return the image (and any string outputs); videos come back as an openable `/view` URL |
+| `run_app(app, values, wait_s?)` | fill only the params you change, convert UI→API, enqueue and wait, return the image (and any string outputs); videos come back as an openable `/view` URL. `wait_s` caps how long it blocks; `0` returns the `prompt_id` immediately |
 | `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
-| `download_output(prompt_id, index?)` | download URL for one finished output, by the `prompt_id` from `run_app` / `job_status`; also returns a real local path when the instance is local |
+| `download_output(prompt_id, index?, dest?)` | download one finished output to a **local file** (bytes via `/view`), returning the real `saved_to` path. `dest` may be a file, a directory or a relative path; omit it to use `DOWNLOAD_DIR` (default `<cwd>/downloads`). Works for local and remote ComfyUI |
 | `queue_status` | what is running + pending, plus a `recent` list of finished jobs (5 by default; `recent: 0` skips history) |
-| `job_status(prompt_id)` | state + output files of one job |
+| `job_status(prompt_id, wait_s?)` | state + output files of one job; `wait_s` blocks until it finishes (or times out) so clients need no polling loop |
 | `clear_queue` | clear the pending queue |
 | `interrupt` | stop the current generation |
 
@@ -35,6 +35,8 @@ workflows path). `values` keys are the friendly param labels (`prompt`, `seed`, 
 A `seed` of `-1` rolls a random seed.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
+**Download**: `download_output` now writes the file to disk (bytes over `/view`) and returns `saved_to`. `dest` may be a file path (`E:/out/clip.mp4`, rename on the way), a directory (`E:/out`, `E:/out/`; no extension also means directory) or a relative path (against the MCP process cwd); omit it to use `DOWNLOAD_DIR`. The file lands on the **machine running this MCP server**, remote ComfyUI included.
+**Waiting**: `run_app` blocks until the result by default; `wait_s: 0` only enqueues and returns the `prompt_id`. Then `job_status(prompt_id, wait_s)` blocks up to N seconds and returns `timed_out: true` plus the current `state` when the budget runs out — call it again to keep waiting instead of guessing client timeouts.
 For apps with an image/video/audio/mask input: first call `upload_file` with a local path, then pass the returned **ComfyUI-side relative path** (e.g. `mybatch/wall.png`) as that param value in `run_app` - ComfyUI reads it from its input dir, not the Windows filesystem, so absolute paths like `E:/.../wall.png` wont resolve.
 
 ## How a native app is read
@@ -73,6 +75,7 @@ API is touched. The `.app.json` files are read straight off disk.
 | `COMFYUI_PUBLIC_URL` | same as `COMFYUI_URL` | address clients use; set it only when this MCP host can reach ComfyUI but clients cannot (container / reverse proxy / tunnel), so download links stay reachable |
 | `WORKFLOWS_ROOT` | auto-detected `<ComfyUI user>` dir | recursively finds `workflows/**\/*.app.json` |
 | `RUN_TIMEOUT_S` | `300` | seconds to wait for a render |
+| `DOWNLOAD_DIR` | `<MCP process cwd>/downloads` | where `download_output` writes when `dest` is omitted |
 
 > The old `COMFYUI_HOST` + `COMFYUI_PORT` pair still works as a fallback, but `COMFYUI_URL` replaces it.
 

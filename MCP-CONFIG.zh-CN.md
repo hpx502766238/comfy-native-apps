@@ -129,6 +129,7 @@ stdio,不支持 HTTP(sse/streamable)。如确有需要可提 issue。
 | `COMFYUI_PUBLIC_URL` | 同 `COMFYUI_URL` | 客户端可达的 ComfyUI 地址；MCP 主机能连、客户端连不上时（容器/反代/隧道）用于生成下载链接 |
 | `WORKFLOWS_ROOT` | 自动探测 | ComfyUI `user` 目录,递归找 `workflows` 下 `*.app.json` |
 | `RUN_TIMEOUT_S` | `300` | 单次渲染等待上限(秒) |
+| `DOWNLOAD_DIR` | `<MCP 进程 cwd>/downloads` | `download_output` 未给 `dest` 时的落盘目录 |
 
 > 旧写法 `COMFYUI_HOST` + `COMFYUI_PORT` 仍兼容，但推荐统一用 `COMFYUI_URL`。
 
