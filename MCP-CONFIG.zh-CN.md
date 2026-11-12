@@ -23,10 +23,10 @@ node E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs
 |------|-----|
 | `command` | `node` |
 | `args` | `[ "<本仓库>/comfy_native_apps.mjs" ]` |
-| `env` | `{ "COMFYUI_PORT": "8188" }`(可选) |
+| `env` | `{ "COMFYUI_URL": "http://127.0.0.1:8188" }`(可选;等价于默认值) |
 | `transport` | `stdio`(dsh/opencode 需要显式写;Claude Code 省略即 stdio) |
 
-其余几个可选环境变量见 README:`COMFYUI_HOST`、`WORKFLOWS_ROOT`、`RUN_TIMEOUT_S`。
+其余几个可选环境变量见 README:`COMFYUI_URL`、`COMFYUI_PUBLIC_URL`、`WORKFLOWS_ROOT`、`RUN_TIMEOUT_S`。旧的 `COMFYUI_HOST` + `COMFYUI_PORT` 仍兼容。
 
 ---
 
@@ -41,14 +41,14 @@ node E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs
     "comfy-native-apps": {
       "command": "node",
       "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
-      "env": { "COMFYUI_PORT": "8188" }
+      "env": { "COMFYUI_URL": "http://127.0.0.1:8188" }
     }
   }
 }
 ```
 
 - 用正斜杠 `/` 的绝对路径(Windows 反斜杠在 JSON 里要转义,绕开)。
-- `env` 里的 `COMFYUI_PORT` 是 ComfyUI 端口,ComfyUI 未用默认 8188 才改。
+- `env` 里的 `COMFYUI_URL` 是 MCP 访问 ComfyUI 的地址,默认就是 `http://127.0.0.1:8188`,没改端口可以不写。
 - 已接入。换机器/换 clone 路径时,把 `args` 里的路径换成实际位置即可。
 
 ---
@@ -74,7 +74,7 @@ dsh 的 MCP 配置存在 `C:\Users\<you>\.dsh\storages\mcp_connector.json`,
           "serverKey": "main",
           "command": "node",
           "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
-          "env": { "COMFYUI_PORT": "8188" },
+          "env": { "COMFYUI_URL": "http://127.0.0.1:8188" },
           "cwd": "",
           "transport": "stdio",
           "headers": {}
@@ -100,7 +100,7 @@ opencode 的 MCP 在项目根 `opencode.json` 的 `mcp` 字段:
     "comfy-native-apps": {
       "type": "local",
       "command": ["node", "E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
-      "environment": { "COMFYUI_PORT": "8188" }
+      "environment": { "COMFYUI_URL": "http://127.0.0.1:8188" }
     }
   }
 }
@@ -125,10 +125,12 @@ stdio,不支持 HTTP(sse/streamable)。如确有需要可提 issue。
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `COMFYUI_HOST` | `127.0.0.1` | ComfyUI 地址 |
-| `COMFYUI_PORT` | `8188` | ComfyUI 端口 |
+| `COMFYUI_URL` | `http://127.0.0.1:8188` | MCP 服务端访问 ComfyUI 的地址 |
+| `COMFYUI_PUBLIC_URL` | 同 `COMFYUI_URL` | 客户端可达的 ComfyUI 地址；MCP 主机能连、客户端连不上时（容器/反代/隧道）用于生成下载链接 |
 | `WORKFLOWS_ROOT` | 自动探测 | ComfyUI `user` 目录,递归找 `workflows` 下 `*.app.json` |
 | `RUN_TIMEOUT_S` | `300` | 单次渲染等待上限(秒) |
+
+> 旧写法 `COMFYUI_HOST` + `COMFYUI_PORT` 仍兼容，但推荐统一用 `COMFYUI_URL`。
 
 *路径说明:* 本文件例子用 `E:/AIGenerationStudio/tools/comfy-native-apps`
 (即本仓库本地位置)。clone 到别处请全局替换。
