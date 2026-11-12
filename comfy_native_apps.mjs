@@ -90,7 +90,8 @@ const TOOLS = [
   },
   {
     name: 'job_status',
-    description: 'Report the state (running / pending / completed / error) and output files of one job by its prompt_id.',
+    description: 'Report the state (running / pending / completed / error) and output files of one job. ' +
+      'Pass the UUID prompt_id returned by run_app. While a job is still queued, its queue number also works.',
     inputSchema: {
       type: 'object',
       properties: { prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or seen in queue_status.' } },
