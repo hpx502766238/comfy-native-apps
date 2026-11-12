@@ -569,6 +569,9 @@ async function localPathOf(it) {
 // type) comes from /history, so callers never need to know ComfyUI's layout.
 export async function downloadOutput({ prompt_id, index = 0 }) {
   if (!prompt_id) throw new Error('prompt_id is required');
+  if (/^\d+$/.test(String(prompt_id).trim())) {
+    throw new Error(`"${prompt_id}" is a queue number, not a prompt_id. Use the UUID returned by run_app (e.g. "24700a6f-…").`);
+  }
   const hist = await getJson(`/history/${encodeURIComponent(prompt_id)}`).catch(() => ({}));
   const entry = hist[prompt_id];
   if (!entry) throw new Error(`no history for prompt_id ${prompt_id} (unknown, or cleared by ComfyUI)`);
@@ -671,25 +674,48 @@ export async function collectOutputs(entry) {
 // --------------------------------------------------------------------------- #
 async function getQueue() {
   const q = await getJson('/queue');
-  const slim = (arr) => (arr ?? []).map((e) => ({
-    prompt_id: e[0],
-    number: e[2],
-    node_count: e[3]?.length ?? 0,
-    class_types: (e[1] ?? Object.create(null)) && Object.values(e[1] ?? {}).slice(0, 4).map((n) => n?.class_type).filter(Boolean),
-  }));
+  // ComfyUI queue entries are [queue_number, prompt_id, prompt, extra_data,
+  // outputs_to_execute]. Very old builds sent [prompt_id, prompt, outputs].
+  // Normalize both shapes and never confuse the queue number with the prompt_id.
+  const slim = (arr) => (arr ?? []).map((e) => {
+    const five = Array.isArray(e) && e.length >= 5;
+    const queueNumber = five ? e[0] : null;
+    const promptId = five ? e[1] : e?.[0];
+    const prompt = (five ? e[2] : e?.[1]) ?? {};
+    const classTypes = Object.values(prompt).slice(0, 4).map((n) => n?.class_type).filter(Boolean);
+    return {
+      prompt_id: String(promptId ?? ''),
+      queue_number: queueNumber,
+      node_count: Object.keys(prompt).length,
+      class_types: classTypes,
+    };
+  });
   return { running: slim(q.queue_running), pending: slim(q.queue_pending) };
 }
 export { getQueue };
 
 export async function jobStatus(promptId) {
+  let id = String(promptId ?? '').trim();
   const q = await getQueue();
-  if (q.running.some((e) => e.prompt_id === promptId)) return { prompt_id: promptId, state: 'running' };
-  if (q.pending.some((e) => e.prompt_id === promptId)) return { prompt_id: promptId, state: 'pending' };
-  const hist = await getJson(`/history/${promptId}`).catch(() => ({}));
-  const e = hist[promptId];
-  if (!e) return { prompt_id: promptId, state: 'unknown' };
-  if (e.status?.status_str === 'error') return { prompt_id: promptId, state: 'error', error: e.status.messages?.find((m) => m?.[0] === 'execution_error')?.[1]?.exception_message };
+  // A bare number is a queue position, not a prompt_id. Accept it as a shorthand
+  // while the job is still queued, then continue with the real UUID.
+  if (/^\d+$/.test(id)) {
+    const hit = [...q.running, ...q.pending].find((e) => String(e.queue_number) === id);
+    if (hit) id = hit.prompt_id;
+  }
+  if (q.running.some((e) => e.prompt_id === id)) return { prompt_id: id, state: 'running' };
+  if (q.pending.some((e) => e.prompt_id === id)) return { prompt_id: id, state: 'pending' };
+  const hist = await getJson(`/history/${id}`).catch(() => ({}));
+  const e = hist[id];
+  if (!e) {
+    return {
+      prompt_id: id,
+      state: 'unknown',
+      hint: 'Use the UUID returned by run_app. A queue number only works while the job is queued; history is cleared after a ComfyUI restart.',
+    };
+  }
+  if (e.status?.status_str === 'error') return { prompt_id: id, state: 'error', error: e.status.messages?.find((m) => m?.[0] === 'execution_error')?.[1]?.exception_message };
   const outs = Object.entries(e.outputs ?? {})
     .flatMap(([nid, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ node: nid, key: k, filename: x.filename, subfolder: x.subfolder ?? '', type: x.type ?? 'output' }))));
-  return { prompt_id: promptId, state: 'completed', outputs: outs };
+  return { prompt_id: id, state: 'completed', outputs: outs };
 }
