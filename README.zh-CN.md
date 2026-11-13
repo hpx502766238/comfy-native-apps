@@ -27,6 +27,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
 `queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
 **下载**：`download_output` 会把文件真正写到本地（从 `/view` 取字节），返回 `saved_to`。`dest` 传文件路径（`E:/out/clip.mp4`，可顺便改名）、目录（`E:/out`、`E:/out/`，没有扩展名也按目录处理）或相对路径（相对 MCP 进程的 cwd）；省略则写到 `DOWNLOAD_DIR`。文件落在 **MCP 服务端所在机器**，远程 ComfyUI 也一样。
+`run_app` 只返回图片预览块和 `/view` 链接（视频只有链接），**不再返回 ComfyUI / MCP 服务端的文件路径**——需要本地文件就调 `download_output`，它返回的 `saved_to` 才是真实落盘路径。
 **等待**：`run_app` 默认会阻塞到出结果；`wait_s: 0` 只入队并立刻返回 `prompt_id`。之后用 `job_status(prompt_id, wait_s)` 阻塞最多 N 秒，超时会返回 `timed_out: true` 和当前 `state`，再调一次即可接着等，不会靠猜客户端超时。
 有图片/视频/音频/mask 输入的应用：先调用 `upload_file`（给本地文件路径），再把返回的 **ComfyUI 侧相对路径**（如 `mybatch/wall.png`）作为该输入参数的值传给 `run_app` —— ComfyUI 是从它的 input 目录读文件的，不是从 Windows 文件系统，所以 `E:/.../wall.png` 这种绝对路径解析不到。
 
