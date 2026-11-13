@@ -555,15 +555,6 @@ export function outputViewUrl(it) {
     `&type=${encodeURIComponent(it.type ?? 'output')}`;
 }
 
-// Real path on THIS machine, or null. Returns null for a remote ComfyUI or a
-// non-local output dir, so callers are never handed a fake local path.
-async function localPathOf(it) {
-  const root = await getOutputRoot().catch(() => '');
-  if (!root) return null;
-  const full = path.join(root, it.subfolder ?? '', it.filename);
-  return fs.existsSync(full) ? full : null;
-}
-
 function viewQuery(it) {
   return `filename=${encodeURIComponent(it.filename)}` +
     (it.subfolder ? `&subfolder=${encodeURIComponent(it.subfolder)}` : '') +
@@ -624,27 +615,10 @@ export async function downloadOutput({ prompt_id, index = 0, dest }) {
   };
 }
 
-// Resolve ComfyUI's output dir so we can report a full path the user can open.
-// Prefer COMFYUI_OUTPUT_DIR, then the running server's --output-directory argv,
-// then <ComfyUI>/output next to the detected user dir.
-let outputRootPromise;
-export function getOutputRoot() {
-  if (process.env.COMFYUI_OUTPUT_DIR) return Promise.resolve(process.env.COMFYUI_OUTPUT_DIR);
-  if (!outputRootPromise) {
-    outputRootPromise = (async () => {
-      try {
-        const s = await getJson('/system_stats');
-        const argv = s?.system?.argv ?? [];
-        const i = argv.indexOf('--output-directory');
-        if (i >= 0 && argv[i + 1]) return path.resolve(argv[i + 1]);
-      } catch { /* fall through to the layout guess */ }
-      return path.join(path.dirname(resolveWorkflowsRoot()), 'output');
-    })();
-  }
-  return outputRootPromise;
-}
-
 // Pull the first image/video out of a finished job, plus any STRING outputs.
+// Only ComfyUI-side metadata (filename/subfolder/type + /view URL) is reported;
+// server filesystem paths are deliberately omitted — a client that wants a local
+// file calls download_output, which returns saved_to on the MCP host.
 export async function collectOutputs(entry) {
   const texts = [];
   for (const [nodeId, nodeOut] of Object.entries(entry.outputs ?? {})) {
@@ -657,17 +631,13 @@ export async function collectOutputs(entry) {
       const items = nodeOut[key];
       if (!items?.length) continue;
       const it = items[0];
-      const q = `filename=${encodeURIComponent(it.filename)}` +
-        (it.subfolder ? `&subfolder=${encodeURIComponent(it.subfolder)}` : '') +
-        `&type=${encodeURIComponent(it.type ?? 'output')}`;
       const meta = { filename: it.filename, subfolder: it.subfolder ?? '', type: it.type ?? 'output', url: outputViewUrl(it) };
-      const local = await localPathOf(it);
       if (key === 'videos' || /\.(mp4|webm|mov|mkv|gif)$/i.test(it.filename)) {
-        return { kind: 'video', ...meta, path: local, extra: texts };
+        return { kind: 'video', ...meta, extra: texts };
       }
-      const data = await getBytes(`/view?${q}`);
+      const data = await getBytes(`/view?${viewQuery(it)}`);
       const mime = /\.(jpe?g)$/i.test(it.filename) ? 'image/jpeg' : /\.webp$/i.test(it.filename) ? 'image/webp' : 'image/png';
-      return { kind: 'image', ...meta, mime, b64: data.toString('base64'), path: local, extra: texts };
+      return { kind: 'image', ...meta, mime, b64: data.toString('base64'), extra: texts };
     }
   }
   return { kind: 'none', text: 'job finished but no image/video output was found', extra: texts };

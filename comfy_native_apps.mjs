@@ -203,7 +203,6 @@ async function runAppHandler({ app, values = {}, wait_s }) {
 
   if (out.kind === 'image') {
     const lines = [`Generated ${out.filename} with app "${a.name}".`, `URL: ${out.url}`];
-    if (out.path) lines.push(`Path: ${out.path}`);
     lines.push(`(prompt_id ${promptId})`);
     if (out.extra?.length) lines.push('', 'Other outputs:', ...out.extra);
     return [
@@ -213,7 +212,6 @@ async function runAppHandler({ app, values = {}, wait_s }) {
   }
   if (out.kind === 'video') {
     const lines = [`App "${a.name}" finished (prompt_id ${promptId}).`, `Video: ${out.url}`];
-    if (out.path) lines.push(`Path: ${out.path}`);
     if (out.extra?.length) lines.push('', 'Other outputs:', ...out.extra);
     return [{ type: 'text', text: lines.join('\n') }];
   }
