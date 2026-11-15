@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 const srv = spawn(process.execPath, ['comfy_native_apps.mjs'], { cwd: process.cwd() });
+// Swallow pipe EPIPE after srv.kill() so the test exits on its own logic, not a crash.
+for (const s of [srv.stdin, srv.stdout, srv.stderr]) s.on('error', () => {});
 srv.stderr.on('data', (d) => process.stderr.write('[srv] ' + d));
 let buf = '';
 const pending = new Map();
@@ -38,7 +40,7 @@ const schema = JSON.parse(text(sc));
 console.log('\n### get_app_params:', schema.name, '->',
   schema.inputs.length, 'params:', schema.inputs.map((i) => i.name + ':' + i.type).join(', '));
 
-const ra = await call('tools/call', { name: 'run_app', arguments: { app: 'Text to Image (Z-Image-Turbo)', values: { width: 512, height: 512, seed: -1 } } });
+const ra = await call('tools/call', { name: 'run_app', arguments: { app: 'Text to Image (Z-Image-Turbo)', inputs: { width: 512, height: 512, seed: -1 } } });
 const content = ra.result?.content ?? [];
 const txt = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
 const img = content.find((c) => c.type === 'image');
@@ -51,6 +53,11 @@ if (img) {
   console.log('  -> NO IMAGE RETURNED');
 }
 
+// A param placed at the top level (not in "inputs") must error, not run with defaults.
+const bad = await call('tools/call', { name: 'run_app', arguments: { app: 'Text to Image (Z-Image-Turbo)', width: 512 } });
+const badOk = bad.result?.isError === true && /takes "app", "inputs", "wait_s" only/.test(text(bad));
+console.log('\n### stray top-level field -> isError:', bad.result?.isError, '(expected true)');
+
 const pidMatch = txt.match(/prompt_id ([0-9a-f-]{36})/);
 if (pidMatch) {
   const js = await call('tools/call', { name: 'job_status', arguments: { prompt_id: pidMatch[1] } });
@@ -58,4 +65,4 @@ if (pidMatch) {
 }
 
 srv.kill();
-setTimeout(() => process.exit(img ? 0 : 1), 200);
+setTimeout(() => process.exit(img && badOk ? 0 : 1), 200);

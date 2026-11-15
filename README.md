@@ -25,7 +25,7 @@ server deletes the indirection: the model sees exactly nine single-purpose tools
 |------|--------------|
 | `list_apps` | catalog only: number, name, id, short description and output types of every native `.app.json` app |
 | `get_app_params(app)` | the parameter contract of ONE app: every input param (name + type + default) and its outputs |
-| `run_app(app, values, wait_s?)` | fill only the params you change, convert UI→API, enqueue and wait, return the image (and any string outputs); videos come back as an openable `/view` URL. `wait_s` caps how long it blocks; `0` returns the `prompt_id` immediately |
+| `run_app(app, inputs, wait_s?)` | fill only the params you change, convert UI→API, enqueue and wait, return the image (and any string outputs); videos come back as an openable `/view` URL. `wait_s` caps how long it blocks; `0` returns the `prompt_id` immediately |
 | `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
 | `download_output(prompt_id, index?, dest?)` | download one finished output to a **local file** (bytes via `/view`), returning the real `saved_to` path. `dest` may be a file, a directory or a relative path; omit it to use `DOWNLOAD_DIR` (default `<cwd>/downloads`). Works for local and remote ComfyUI |
 | `queue_status` | what is running + pending, plus a `recent` list of finished jobs (5 by default; `recent: 0` skips history) |
@@ -36,9 +36,11 @@ server deletes the indirection: the model sees exactly nine single-purpose tools
 `list_apps` is a catalog only — call `get_app_params(app)` for an app's params, so a
 long app list never buries the model in inputs it does not need. `run_app` `app` may be
 the number from `list_apps`, the app name, or its id (relative workflows path); pass the
-**id** when several apps share a name. `values` keys are the param labels from
-`get_app_params` (`prompt`, `seed`, …).
-A `seed` of `-1` rolls a random seed.
+**id** when several apps share a name. `inputs` keys are the param labels from
+`get_app_params` (`prompt`, `seed`, …). A `seed` of `-1` rolls a random seed.
+Params go in the `inputs` object **only** — a stray top-level field is an error, not a
+silently-ignored default, and a mistyped param name is reported with a pointer to
+`get_app_params`. Both mistakes fail before anything is enqueued.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
 **Download**: `download_output` now writes the file to disk (bytes over `/view`) and returns `saved_to`. `dest` may be a file path (`E:/out/clip.mp4`, rename on the way), a directory (`E:/out`, `E:/out/`; no extension also means directory) or a relative path (against the MCP process cwd); omit it to use `DOWNLOAD_DIR`. The file lands on the **machine running this MCP server**, remote ComfyUI included.
