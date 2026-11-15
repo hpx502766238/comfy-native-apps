@@ -111,23 +111,36 @@ export function loadNativeApp(file) {
     const target = link ? nodesById.get(link.target_id) : undefined;
     const socket = target?.inputs?.[link.target_slot]?.name ?? null;
     const named = target?.widgets_values_named ?? {};
+    // One port can fan out to several internal widgets; every one needs the value.
+    const targets = [];
+    for (const lid of p.linkIds ?? []) {
+      const l = linksById.get(lid);
+      const s = l ? nodesById.get(l.target_id)?.inputs?.[l.target_slot]?.name : undefined;
+      if (s) targets.push({ nodeId: l.target_id, socket: s });
+    }
     return {
       portId: p.id,
       portName: p.name,
       label: p.label ?? p.name,
       type: p.type,
-      targetNodeId: link ? link.target_id : null,
-      targetSocket: socket,
+      targets,
       default: p.name in portValues ? portValues[p.name] : (socket && socket in named ? named[socket] : null),
     };
   });
 
   // Pre-populated overrides: each port's real value (from the ref node) applied to
   // the internal node+socket it feeds. User run_app values layer on top of these.
+  // A port can fan out to several nodes (e.g. one "channel" string driving two
+  // Branch nodes), so every link of the port must receive the value — the others
+  // would otherwise fall back to their own stale saved widget.
   const portOverrides = new Map();
-  for (const inp of inputs) {
-    if (inp.targetNodeId != null && inp.targetSocket != null && inp.portName in portValues) {
-      portOverrides.set(`${inp.targetNodeId}:${inp.targetSocket}`, portValues[inp.portName]);
+  for (const p of sg.inputs ?? []) {
+    if (!(p.name in portValues)) continue;
+    for (const lid of p.linkIds ?? []) {
+      const link = linksById.get(lid);
+      if (!link) continue;
+      const socket = nodesById.get(link.target_id)?.inputs?.[link.target_slot]?.name;
+      if (socket) portOverrides.set(`${link.target_id}:${socket}`, portValues[p.name]);
     }
   }
 
@@ -226,6 +239,12 @@ export function expandFilenameTokens(value) {
 //   • not linked (plain widget)                  -> named default
 // Plus any widget present in widgets_values_named that is not a socket
 // (e.g. KSampler's "control_after_generate") is appended so the prompt is complete.
+// A list widget value (e.g. BranchNode's `branch_names`, an ARRAY rendered as a
+// widget) must not reach the API prompt as a bare list: the server reads any list
+// as a [node_id, slot] link and rejects it with bad_linked_input. Execution
+// unwraps `{"__value__": [...]}` back to the list, which is the only accepted shape.
+const asWidgetValue = (v) => (Array.isArray(v) ? { __value__: v } : v);
+
 export function graphToPrompt(app, overrides) {
   const { nodesById, linksById, shellIn } = app;
   // Port values (from the subgraph ref node) are the baseline; user overrides win.
@@ -245,13 +264,13 @@ export function graphToPrompt(app, overrides) {
           // first element of a [node_id, slot] link reference.
           inputs[s.name] = [String(l.origin_id), l.origin_slot];
         } else {
-          inputs[s.name] = s.name in named ? named[s.name] : null;
+          inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
         }
       } else {
-        inputs[s.name] = s.name in named ? named[s.name] : null;
+        inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
       }
     }
-    for (const [k, v] of Object.entries(named)) if (!(k in inputs)) inputs[k] = v;
+    for (const [k, v] of Object.entries(named)) if (!(k in inputs)) inputs[k] = asWidgetValue(v);
     prompt[n.id] = { class_type: n.type, inputs };
   }
 
@@ -348,7 +367,7 @@ export function graphToPrompt(app, overrides) {
           if (v !== null && v !== undefined) inputs[s.name] = v;
         }
       } else if (s.widget && s.name in named) {
-        inputs[s.name] = named[s.name];
+        inputs[s.name] = asWidgetValue(named[s.name]);
       }
     }
     // Widgets that belong to the API contract even though the UI lists them as
@@ -357,15 +376,17 @@ export function graphToPrompt(app, overrides) {
       if (k in inputs) continue;
       if ((n.inputs ?? []).some((i) => i.name === k)) continue;
       if (/preview/i.test(k)) continue;
-      inputs[k] = v;
+      inputs[k] = asWidgetValue(v);
     }
     prompt[topKey(n.id)] = { class_type: n.type, inputs };
   }
 
-  // Only add a synthetic saver when the app's own top-level saver is absent
+  // Only add a synthetic saver when the app's own top-level sink is absent
   // (hand-edited workflow, muted saver, headless import, …), so we never dump a
-  // frame sequence next to the real video/image the author configured.
-  const SAVER_RE = /^(VHS_VideoCombine|SaveVideo|SaveAnimatedWEBM|SaveAnimatedPNG|SaveImage|SaveImageAdvanced|SaveAudio|SaveAudioMP3|SaveAudioOpus)$/;
+  // frame sequence next to the real video/image the author configured. A
+  // PreviewImage counts as a sink: the app author chose not to persist that
+  // output, and its temp file is still downloadable from /history.
+  const SAVER_RE = /^(VHS_VideoCombine|SaveVideo|SaveAnimatedWEBM|SaveAnimatedPNG|SaveImage|SaveImageAdvanced|SaveAudio|SaveAudioMP3|SaveAudioOpus|PreviewImage|PreviewAny)$/;
   let saverId = 999000;
   for (let i = 0; i < app.outputs.length; i++) {
     const out = app.outputs[i];
@@ -418,20 +439,21 @@ export function buildOverrides(app, values) {
   for (const [rawKey, rawVal] of Object.entries(values ?? {})) {
     const key = String(rawKey).trim();
     const m = /^(\d+):(.+)$/.exec(key) || /^(\d+)\.(.+)$/.exec(key);
-    let nodeId, socket, type;
+    let targets, type;
     if (m) {
-      nodeId = m[1]; socket = m[2];
-      const p = app.inputs.find((i) => String(i.targetNodeId) === nodeId && i.targetSocket === socket);
+      const p = app.inputs.find((i) => (i.targets ?? []).some((t) => String(t.nodeId) === m[1] && t.socket === m[2]));
+      targets = p?.targets ?? [{ nodeId: m[1], socket: m[2] }];
       type = p?.type;
     } else {
       const p = byLabel.get(key);
       if (!p) throw new Error(`unknown param "${key}" — available: ${app.inputs.map((i) => i.label).join(', ')}`);
-      nodeId = p.targetNodeId; socket = p.targetSocket; type = p.type;
+      targets = p.targets ?? [];
+      type = p.type;
     }
-    if (nodeId == null || socket == null) throw new Error(`param "${key}" has no internal target`);
+    if (!targets.length) throw new Error(`param "${key}" has no internal target`);
     let v = rawVal;
-    if (/seed/i.test(socket) && Number(v) === -1) v = Math.floor(Math.random() * 0xffffffff);
-    ov.set(`${nodeId}:${socket}`, coerceByType(v, type));
+    if (/seed/i.test(targets[0].socket) && Number(v) === -1) v = Math.floor(Math.random() * 0xffffffff);
+    for (const t of targets) ov.set(`${t.nodeId}:${t.socket}`, coerceByType(v, type));
   }
   return ov;
 }
@@ -594,7 +616,8 @@ export async function downloadOutput({ prompt_id, index = 0, dest }) {
   }
   const items = Object.values(entry.outputs ?? {})
     .flatMap((o) => ['images', 'videos', 'gifs'].flatMap((k) => (Array.isArray(o?.[k]) ? o[k] : [])))
-    .filter((x) => x && typeof x === 'object' && x.filename);
+    .filter((x) => x && typeof x === 'object' && x.filename)
+    .sort((a, b) => Number(a.type === 'temp') - Number(b.type === 'temp'));
   if (!items.length) throw new Error(`job ${prompt_id} has no downloadable outputs (state: ${entry.status?.status_str ?? 'unknown'})`);
   const i = Math.max(0, Number(index) || 0);
   const it = items[i];
@@ -626,19 +649,24 @@ export async function collectOutputs(entry) {
       if (Array.isArray(items) && items.length && typeof items[0] === 'string') texts.push(`${key}: ${items[0]}`);
     }
   }
+  // Saved files win over temp previews, so a PreviewImage inside the graph does
+  // not shadow the real result. Order is otherwise preserved (first node wins).
+  const cands = [];
   for (const nodeOut of Object.values(entry.outputs ?? {})) {
     for (const key of ['images', 'gifs', 'videos']) {
       const items = nodeOut[key];
-      if (!items?.length) continue;
-      const it = items[0];
-      const meta = { filename: it.filename, subfolder: it.subfolder ?? '', type: it.type ?? 'output', url: outputViewUrl(it) };
-      if (key === 'videos' || /\.(mp4|webm|mov|mkv|gif)$/i.test(it.filename)) {
-        return { kind: 'video', ...meta, extra: texts };
-      }
-      const data = await getBytes(`/view?${viewQuery(it)}`);
-      const mime = /\.(jpe?g)$/i.test(it.filename) ? 'image/jpeg' : /\.webp$/i.test(it.filename) ? 'image/webp' : 'image/png';
-      return { kind: 'image', ...meta, mime, b64: data.toString('base64'), extra: texts };
+      if (items?.length) cands.push({ key, it: items[0] });
     }
+  }
+  cands.sort((a, b) => Number(a.it.type === 'temp') - Number(b.it.type === 'temp'));
+  for (const { key, it } of cands) {
+    const meta = { filename: it.filename, subfolder: it.subfolder ?? '', type: it.type ?? 'output', url: outputViewUrl(it) };
+    if (key === 'videos' || /\.(mp4|webm|mov|mkv|gif)$/i.test(it.filename)) {
+      return { kind: 'video', ...meta, extra: texts };
+    }
+    const data = await getBytes(`/view?${viewQuery(it)}`);
+    const mime = /\.(jpe?g)$/i.test(it.filename) ? 'image/jpeg' : /\.webp$/i.test(it.filename) ? 'image/webp' : 'image/png';
+    return { kind: 'image', ...meta, mime, b64: data.toString('base64'), extra: texts };
   }
   return { kind: 'none', text: 'job finished but no image/video output was found', extra: texts };
 }

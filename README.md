@@ -10,6 +10,8 @@ artokun comfyui-mcp / panel plugin**.
 
 Node 18+ only (global `fetch`, `structuredClone`). No `npm install`.
 
+Tested against ComfyUI **0.45.3** (frontend 1.58.5) with native `.app.json` apps.
+
 ## Why
 
 artokun's comfyui-mcp exposes ~38 action-parameterized tools (plus 3 facade meta-tools
@@ -36,7 +38,7 @@ A `seed` of `-1` rolls a random seed.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
 **Download**: `download_output` now writes the file to disk (bytes over `/view`) and returns `saved_to`. `dest` may be a file path (`E:/out/clip.mp4`, rename on the way), a directory (`E:/out`, `E:/out/`; no extension also means directory) or a relative path (against the MCP process cwd); omit it to use `DOWNLOAD_DIR`. The file lands on the **machine running this MCP server**, remote ComfyUI included.
-`run_app` only returns the image preview block and the `/view` URL (videos: URL only) — **no ComfyUI / MCP server file paths**. For a local file call `download_output`; its `saved_to` is the real on-disk path.
+`run_app` only returns the image preview block and the `/view` URL (videos: URL only) — **no ComfyUI / MCP server file paths**. For a local file call `download_output`; its `saved_to` is the real on-disk path. When a job produced both a saved file and a temp preview, the saved file is the one returned (`download_output` uses the same order).
 **Waiting**: `run_app` blocks until the result by default; `wait_s: 0` only enqueues and returns the `prompt_id`. Then `job_status(prompt_id, wait_s)` blocks up to N seconds and returns `timed_out: true` plus the current `state` when the budget runs out — call it again to keep waiting instead of guessing client timeouts.
 For apps with an image/video/audio/mask input: first call `upload_file` with a local path, then pass the returned **ComfyUI-side relative path** (e.g. `mybatch/wall.png`) as that param value in `run_app` - ComfyUI reads it from its input dir, not the Windows filesystem, so absolute paths like `E:/.../wall.png` wont resolve.
 
@@ -51,7 +53,8 @@ converts the subgraph's `nodes` + `links` to an API-format prompt:
 - a socket linked from the inputNode shell (`-10`) or not linked → its `widgets_values_named` default
 - a model-filled value → the override (type-coerced to the port's declared type)
 - widgets that aren't sockets (e.g. KSampler `control_after_generate`) → appended so the prompt is complete
-- top-level saver nodes (`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …) are converted too — a native app keeps them outside the subgraph, and converting only the subgraph left video apps with a pile of loose PNG frames. A synthetic `SaveImage` / `SaveAnimatedWEBM` is only attached when an output has no real saver
+- a **list-valued widget** (e.g. `BranchNode`'s `branch_names`, an `ARRAY` rendered as a widget) → `{"__value__": [...]}`, because the raw API reads any bare list as a `[node_id, slot]` link and rejects it with `bad_linked_input`
+- top-level saver nodes (`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …) are converted too — a native app keeps them outside the subgraph, and converting only the subgraph left video apps with a pile of loose PNG frames. A synthetic `SaveImage` / `SaveAnimatedWEBM` is only attached when an output has no real sink; a `PreviewImage` counts as a sink (the author chose not to persist that output, and its temp file is still downloadable from `/history`)
 - filename tokens such as `%date:yyyy-MM-dd%` are expanded (the web frontend does this before submitting; the raw API does not)
 - a nested subgraph reference (`class_type` is a subgraph UUID) cannot be executed through the API, so conversion stops there and falls back to the synthetic saver
 
@@ -59,10 +62,12 @@ converts the subgraph's `nodes` + `links` to an API-format prompt:
 values are stored on the subgraph **reference node** — the top-level node whose `type`
 is the subgraph's id — in its `widgets_values_named`, keyed by port *name*. The internal
 nodes (e.g. a `UNETLoader`) keep the template's original defaults, which can be stale.
-This server reads the port values from the reference node and applies them to the internal
-node+socket each port feeds (as pre-populated overrides), so the app runs with the values
+This server reads the port values from the reference node and applies them to every internal
+node+socket the port feeds (as pre-populated overrides), so the app runs with the values
 the user actually set — including model paths with their subfolder prefix (e.g.
-`zimage\z_image_turbo_int8_convrot.safetensors`). User `run_app` values layer on top.
+`zimage\z_image_turbo_int8_convrot.safetensors`). A port can fan out to several nodes (one
+"channel" string driving two `BranchNode`s, say); all of them receive the value, and user
+`run_app` values layer on top the same way.
 
 Because the conversion happens here, the same `run_app` works whether ComfyUI is
 headless (`--front-end-version 0`, no UI) or running the web frontend — only the core
