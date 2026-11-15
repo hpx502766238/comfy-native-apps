@@ -6,6 +6,8 @@ ComfyUI原生应用工作流轻量执行器MCP，适合小模型
 
 仅需 Node 18+（全局 `fetch`、`structuredClone`）。无需 `npm install`。
 
+测试环境：ComfyUI **0.45.3**（前端 1.58.5），原生 `.app.json` 应用。
+
 ## 为什么
 
 artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3 个门面元工具和 96 个面板接口）。即使是它的紧凑模式，也会逼着模型走 `list → describe_tool → call_tool` 这条链，而 9B 级别的本地模型会在 `describe_tool` 上无限打转。这个服务器把中间层删掉：模型只看到 8 个单一用途的工具。
@@ -27,7 +29,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
 `queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
 **下载**：`download_output` 会把文件真正写到本地（从 `/view` 取字节），返回 `saved_to`。`dest` 传文件路径（`E:/out/clip.mp4`，可顺便改名）、目录（`E:/out`、`E:/out/`，没有扩展名也按目录处理）或相对路径（相对 MCP 进程的 cwd）；省略则写到 `DOWNLOAD_DIR`。文件落在 **MCP 服务端所在机器**，远程 ComfyUI 也一样。
-`run_app` 只返回图片预览块和 `/view` 链接（视频只有链接），**不再返回 ComfyUI / MCP 服务端的文件路径**——需要本地文件就调 `download_output`，它返回的 `saved_to` 才是真实落盘路径。
+`run_app` 只返回图片预览块和 `/view` 链接（视频只有链接），**不再返回 ComfyUI / MCP 服务端的文件路径**——需要本地文件就调 `download_output`，它返回的 `saved_to` 才是真实落盘路径。同一个任务里既有落盘文件又有临时预览图时，优先返回落盘文件（`download_output` 的顺序一致）。
 **等待**：`run_app` 默认会阻塞到出结果；`wait_s: 0` 只入队并立刻返回 `prompt_id`。之后用 `job_status(prompt_id, wait_s)` 阻塞最多 N 秒，超时会返回 `timed_out: true` 和当前 `state`，再调一次即可接着等，不会靠猜客户端超时。
 有图片/视频/音频/mask 输入的应用：先调用 `upload_file`（给本地文件路径），再把返回的 **ComfyUI 侧相对路径**（如 `mybatch/wall.png`）作为该输入参数的值传给 `run_app` —— ComfyUI 是从它的 input 目录读文件的，不是从 Windows 文件系统，所以 `E:/.../wall.png` 这种绝对路径解析不到。
 
@@ -39,11 +41,12 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 - 从 inputNode 外壳（`-10`）连出、或未连接的 socket → 其 `widgets_values_named` 默认值
 - 模型填的值 → 覆盖值（按端口声明类型做类型强转）
 - 非 socket 的控件（如 KSampler 的 `control_after_generate`）→ 追加，使 prompt 完整
-- 顶层保存节点（`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …）也会被转换——原生 app 把它们留在子图外面，只转子图会导致视频 app 只落一堆 PNG 帧。只有该输出没有任何真实保存节点时，才挂一个合成的 `SaveImage` / `SaveAnimatedWEBM` 兜底
+- **值为列表的控件**（如 `BranchNode` 的 `branch_names`，即以控件形式渲染的 `ARRAY`）→ `{"__value__": [...]}`：裸数组会被原生 API 当成 `[node_id, slot]` 连线并报 `bad_linked_input`
+- 顶层保存节点（`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …）也会被转换——原生 app 把它们留在子图外面，只转子图会导致视频 app 只落一堆 PNG 帧。只有该输出没有任何真实落点时才挂一个合成的 `SaveImage` / `SaveAnimatedWEBM`；`PreviewImage` 也算落点（作者本就不想持久化这份输出，它的临时文件仍可从 `/history` 下载）
 - 文件名里的 `%date:yyyy-MM-dd%` 一类令牌会被展开（这是前端提交前做的，直连 API 不会）
 - 嵌套子图引用（`class_type` 是子图 UUID）无法直接下发给 API，转换会停在那里并回退到兜底保存
 
-**端口的真实值存在哪。** 在 app 模式下，暴露的输入端口的*已配置*值存放在 subgraph **引用节点**上——即那个 `type` 等于 subgraph id 的顶层节点——在其 `widgets_values_named` 里，以端口*名称*为键。内部节点（如 `UNETLoader`）保存的是模板的原始默认值，可能是过期的。本服务器从引用节点读取端口值，并把它们应用到每个端口所填充的内部节点+socket 上（作为预填的覆盖值），这样应用就能用用户真正设置的值运行——包括带子目录前缀的模型路径（例如 `zimage\z_image_turbo_int8_convrot.safetensors`）。用户的 `run_app` 值叠加在其上。
+**端口的真实值存在哪。** 在 app 模式下，暴露的输入端口的*已配置*值存放在 subgraph **引用节点**上——即那个 `type` 等于 subgraph id 的顶层节点——在其 `widgets_values_named` 里，以端口*名称*为键。内部节点（如 `UNETLoader`）保存的是模板的原始默认值，可能是过期的。本服务器从引用节点读取端口值，并把它们应用到该端口所填充的**每一个**内部节点+socket 上（作为预填的覆盖值），这样应用就能用用户真正设置的值运行——包括带子目录前缀的模型路径（例如 `zimage\z_image_turbo_int8_convrot.safetensors`）。一个端口可以扇出到多个节点（比如一个"通道"字符串同时驱动两个 `BranchNode`），它们都会收到这个值；用户的 `run_app` 值同样会扇出叠加。
 
 因为转换发生在这里，同一个 `run_app` 无论 ComfyUI 是无头模式（`--front-end-version 0`，无 UI）还是跑着 Web 前端都能用——只碰核心 API。`.app.json` 文件直接从磁盘读取。
 
