@@ -13,12 +13,12 @@
 //                                     types for every native .app.json app
 //   get_app_params(app)            -> the parameter contract of ONE app
 //                                     (input name + type + default, outputs)
-//   run_app(app, values, wait_s?)  -> fill only the params you want to change,
+//   run_app(app, inputs, wait_s?)  -> fill only the params you want to change,
 //                                     convert UI→API, enqueue, wait, return the
 //                                     image (or the video URL); wait_s: 0 = submit only
 //   upload_file(path, subfolder)   -> upload a LOCAL file (image/video/audio/mask)
 //                                     into ComfyUI's input dir; returns the
-//                                     ComfyUI-side relative path for run_app values
+//                                     ComfyUI-side relative path for a file param
 //   download_output(prompt_id, index?, dest?) -> download one finished output to a
 //                                     local file (file or dir dest); works remote too
 //   queue_status(recent?)         -> what is running + pending, plus recent finished jobs
@@ -68,15 +68,17 @@ const TOOLS = [
     name: 'run_app',
     description: 'Run one app: fill its input params and generate. Waits for the job and returns the finished image ' +
       '(or the video URL). Pass app as its number from list_apps, its name, or its id. ' +
-      'Call get_app_params first to see the params. Pass only the params you want to change; omitted ones keep ' +
-      'their defaults. A seed of -1 rolls a random seed. Set wait_s to 0 to enqueue and return the prompt_id immediately.',
+      'Call get_app_params first, then pass the params you want to change in the "inputs" object ' +
+      '(NOT at the top level — a stray field is an error, not a silently-ignored default). ' +
+      'Omitted ones keep their defaults. A seed of -1 rolls a random seed. ' +
+      'Set wait_s to 0 to enqueue and return the prompt_id immediately.',
     inputSchema: {
       type: 'object',
       properties: {
-        app: { type: 'string', description: 'Which app to run: its number from list_apps (e.g. "1"), its name, or its id.' },
-        values: {
+        app: { type: 'string', description: 'Which app to run: its number from list_apps (e.g. "1"), its name, or its id (relative workflows path).' },
+        inputs: {
           type: 'object',
-          description: 'Params to fill. Keys are the param names shown by get_app_params (e.g. "prompt", "seed"). Omit any you want to leave at its default.',
+          description: 'Params to fill, keyed by the names get_app_params returns (e.g. "prompt", "seed"). Omit any you want to leave at its default.',
           additionalProperties: true,
         },
         wait_s: {
@@ -176,9 +178,32 @@ async function downloadOutputHandler(args) {
   return [{ type: 'text', text: JSON.stringify(r, null, 2) }];
 }
 
-async function runAppHandler({ app, values = {}, wait_s }) {
+// Params travel in ONE field, "inputs" (the same word get_app_params returns).
+// Anything else at the top level is a misplaced param — a model that meant "inputs"
+// but wrote "input" / "values" / "params", or flat name → value pairs. Failing loudly
+// here is the whole point: silently dropping them would run the app with its saved
+// defaults and return a plausible image the model takes for its own request.
+async function runAppHandler({ app, wait_s, inputs, ...stray }) {
   const ref = resolveAppRef(app);
   const a = loadNativeApp(ref.file);
+  const labels = new Set(a.inputs.map((i) => String(i.label)));
+  const strayNames = Object.keys(stray);
+  if (strayNames.length) {
+    // Name the strays that are clearly this app's params so the model sees its own
+    // mistake, not a generic "unknown key".
+    const asParams = strayNames.filter((k) => labels.has(k) || /^loras?\./i.test(k) || /seed|prompt|width|height/i.test(k));
+    const where = asParams.length
+      ? `"${asParams.join('", "')}" ${asParams.length === 1 ? 'is' : 'are'} ${a.name}'s params`
+      : `top-level "${strayNames.join('", "')}" ${strayNames.length === 1 ? 'is' : 'are'} not a run_app field`;
+    throw new Error(
+      `run_app takes "app", "inputs", "wait_s" only — ${where}. ` +
+      `Move every param inside the "inputs" object (see get_app_params); left at the top level it would be ignored and the app would run with its saved defaults.`,
+    );
+  }
+  if (inputs !== undefined && (typeof inputs !== 'object' || inputs === null || Array.isArray(inputs))) {
+    throw new Error('"inputs" must be an object of param name → value (see get_app_params)');
+  }
+  const values = inputs ?? {};
   const overrides = buildOverrides(a, values);
   const prompt = graphToPrompt(a, overrides);
   const resp = await postPrompt(prompt);
