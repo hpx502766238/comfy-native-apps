@@ -16,7 +16,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 
 | 工具 | 作用 |
 |------|------|
-| `list_apps` | 只给目录：所有原生 `.app.json` 应用的编号、名称、简短描述和输出类型 |
+| `list_apps` | 只给目录：所有原生 `.app.json` 应用的编号、名称、id、简短描述和输出类型 |
 | `get_app_params(app)` | 单个应用的参数契约：每个输入参数（名称 + 类型 + 默认值）和它的输出 |
 | `run_app(app, values, wait_s?)` | 只填你要改的参数，做 UI→API 转换，入队并等待，返回图片（以及任何字符串输出）；视频返回可直接打开的 `/view` 链接。`wait_s` 是本次最多阻塞多少秒，`0` 表示只入队、立刻返回 `prompt_id` |
 | `upload_file(path, subfolder?)` | 把本地文件（图片/视频/音频/mask）上传进 ComfyUI 的 input 目录；返回可在 `run_app` 的输入参数里直接使用的 ComfyUI 侧相对路径 |
@@ -26,7 +26,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 | `clear_queue` | 清空排队中的任务 |
 | `interrupt` | 停止当前生成 |
 
-`list_apps` 只返回目录——某个应用的参数要用 `get_app_params(app)` 单独查，这样应用一多也不会用无关的输入项把模型淹没。`run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）。`values` 的键是 `get_app_params` 里的参数名（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
+`list_apps` 只返回目录——某个应用的参数要用 `get_app_params(app)` 单独查，这样应用一多也不会用无关的输入项把模型淹没。`run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）；**同名应用要用 id 区分**。`values` 的键是 `get_app_params` 里的参数名（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
 `queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
 **下载**：`download_output` 会把文件真正写到本地（从 `/view` 取字节），返回 `saved_to`。`dest` 传文件路径（`E:/out/clip.mp4`，可顺便改名）、目录（`E:/out`、`E:/out/`，没有扩展名也按目录处理）或相对路径（相对 MCP 进程的 cwd）；省略则写到 `DOWNLOAD_DIR`。文件落在 **MCP 服务端所在机器**，远程 ComfyUI 也一样。

@@ -23,7 +23,7 @@ server deletes the indirection: the model sees exactly nine single-purpose tools
 
 | tool | what it does |
 |------|--------------|
-| `list_apps` | catalog only: number, name, short description and output types of every native `.app.json` app |
+| `list_apps` | catalog only: number, name, id, short description and output types of every native `.app.json` app |
 | `get_app_params(app)` | the parameter contract of ONE app: every input param (name + type + default) and its outputs |
 | `run_app(app, values, wait_s?)` | fill only the params you change, convert UI→API, enqueue and wait, return the image (and any string outputs); videos come back as an openable `/view` URL. `wait_s` caps how long it blocks; `0` returns the `prompt_id` immediately |
 | `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
@@ -35,8 +35,9 @@ server deletes the indirection: the model sees exactly nine single-purpose tools
 
 `list_apps` is a catalog only — call `get_app_params(app)` for an app's params, so a
 long app list never buries the model in inputs it does not need. `run_app` `app` may be
-the number from `list_apps`, the app name, or its id (relative workflows path). `values`
-keys are the param labels from `get_app_params` (`prompt`, `seed`, …).
+the number from `list_apps`, the app name, or its id (relative workflows path); pass the
+**id** when several apps share a name. `values` keys are the param labels from
+`get_app_params` (`prompt`, `seed`, …).
 A `seed` of `-1` rolls a random seed.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
