@@ -28,10 +28,16 @@ await call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clie
 srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
 
 const la = await call('tools/call', { name: 'list_apps', arguments: {} });
-const apps = JSON.parse(text(la)).apps;
-console.log('### list_apps:', apps.length, 'apps ->', apps.map((a) => a.number + ':' + a.name).join(' | '));
+const catalog = JSON.parse(text(la));
+const apps = catalog.apps;
+console.log('### list_apps:', apps.length, 'apps ->',
+  apps.map((a) => a.number + ':' + (a.name ?? 'unreadable')).join(' | '));
 
-// run the krea2 txt2img app (number 2) with a small overridden render
+const sc = await call('tools/call', { name: 'get_app_params', arguments: { app: 'Text to Image (Z-Image-Turbo)' } });
+const schema = JSON.parse(text(sc));
+console.log('\n### get_app_params:', schema.name, '->',
+  schema.inputs.length, 'params:', schema.inputs.map((i) => i.name + ':' + i.type).join(', '));
+
 const ra = await call('tools/call', { name: 'run_app', arguments: { app: 'Text to Image (Z-Image-Turbo)', values: { width: 512, height: 512, seed: -1 } } });
 const content = ra.result?.content ?? [];
 const txt = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
@@ -45,7 +51,7 @@ if (img) {
   console.log('  -> NO IMAGE RETURNED');
 }
 
-const pidMatch = txt.match(/prompt_id (\S+)/);
+const pidMatch = txt.match(/prompt_id ([0-9a-f-]{36})/);
 if (pidMatch) {
   const js = await call('tools/call', { name: 'job_status', arguments: { prompt_id: pidMatch[1] } });
   console.log('\n### job_status(' + pidMatch[1] + '):'); console.log(text(js));

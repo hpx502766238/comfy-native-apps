@@ -446,7 +446,7 @@ export function buildOverrides(app, values) {
       type = p?.type;
     } else {
       const p = byLabel.get(key);
-      if (!p) throw new Error(`unknown param "${key}" — available: ${app.inputs.map((i) => i.label).join(', ')}`);
+      if (!p) throw new Error(`unknown param "${key}" — call get_app_params("${app.name}") for its parameter list`);
       targets = p.targets ?? [];
       type = p.type;
     }
@@ -466,22 +466,54 @@ export function listApps() {
   const files = findNativeApps(root);
   const apps = files.map((f, i) => {
     let a;
-    try { a = loadNativeApp(f); } catch { return { number: i + 1, file: f, error: 'unreadable' }; }
+    try { a = loadNativeApp(f); } catch (e) { return { number: i + 1, file: f, error: e.message }; }
     return {
       number: i + 1,
       name: a.name,
       id: a.id,
       file: f,
       description: a.description,
-      inputs: a.inputs.map((inp) => {
-        const p = { name: inp.label, type: inp.type };
-        if (inp.default !== null && inp.default !== undefined) p.default = inp.default;
-        return p;
-      }),
       outputs: a.outputs.map((o) => ({ name: o.name, type: o.type })),
     };
   });
   return { workflowsRoot: root, count: apps.length, apps };
+}
+
+// list_apps payload: only what is needed to CHOOSE an app. The parameter contract
+// is a separate per-app call (appParams), so a 20-app catalog does not bury a
+// small model in a wall of inputs.
+export function appCatalog() {
+  const { workflowsRoot, apps } = listApps();
+  const list = apps.map((a) => (a.error
+    ? { number: a.number, error: a.error }
+    : {
+      number: a.number,
+      name: a.name,
+      description: a.description,
+      outputs: [...new Set(a.outputs.map((o) => o.type))],
+    }));
+  const out = { count: list.length, apps: list };
+  // Only surface the scan root when nothing was found — that is when it matters.
+  if (!list.length) out.workflowsRoot = workflowsRoot;
+  return out;
+}
+
+// get_app_params payload: the full parameter contract of ONE app.
+export function appParams(ref) {
+  const app = resolveAppRef(ref);
+  const a = loadNativeApp(app.file);
+  return {
+    number: app.number,
+    name: a.name,
+    id: a.id,
+    description: a.description,
+    inputs: a.inputs.map((inp) => {
+      const p = { name: inp.label, type: inp.type };
+      if (inp.default !== null && inp.default !== undefined) p.default = inp.default;
+      return p;
+    }),
+    outputs: a.outputs.map((o) => ({ name: o.name, type: o.type })),
+  };
 }
 
 export function resolveAppRef(ref) {

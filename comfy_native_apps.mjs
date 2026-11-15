@@ -9,8 +9,10 @@
 // Tools (no list_tools / describe_tool / call_tool indirection — the model sees
 // exactly these, each single-purpose):
 //
-//   list_apps()                    -> every native .app.json app, with the exact
-//                                     input params to fill (label + type) and outputs
+//   list_apps()                    -> catalog: number, name, description, output
+//                                     types for every native .app.json app
+//   get_app_params(app)            -> the parameter contract of ONE app
+//                                     (input name + type + default, outputs)
 //   run_app(app, values, wait_s?)  -> fill only the params you want to change,
 //                                     convert UI→API, enqueue, wait, return the
 //                                     image (or the video URL); wait_s: 0 = submit only
@@ -35,7 +37,7 @@
 //     "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
 //     "env": { "COMFYUI_URL": "http://127.0.0.1:8188" } }
 import {
-  BASE, RUN_TIMEOUT_S, listApps, resolveAppRef, loadNativeApp,
+  BASE, RUN_TIMEOUT_S, appCatalog, appParams, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,
   getQueue, jobStatus, postJson, uploadFile, downloadOutput,
 } from './native_lib.mjs';
@@ -46,23 +48,35 @@ const SERVER_INFO = { name: 'comfy-native-apps', version: '1.0.0' };
 const TOOLS = [
   {
     name: 'list_apps',
-    description: 'List every ComfyUI app (.app.json) available on the server. ' +
-      'Each app shows its input params (name + type + default) and outputs. Call this first, then run_app.',
+    description: 'List the ComfyUI apps (.app.json) available on the server: number, name, short description and ' +
+      'output types. Call this first to pick an app, then get_app_params(app) for the params you can fill.',
     inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_app_params',
+    description: 'Show the parameter contract of ONE app: every input param (name, type, default) and its outputs. ' +
+      'Call this after list_apps and before run_app to see which params exist.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        app: { type: 'string', description: 'Which app: its number from list_apps (e.g. "1"), its name, or its id.' },
+      },
+      required: ['app'],
+    },
   },
   {
     name: 'run_app',
     description: 'Run one app: fill its input params and generate. Waits for the job and returns the finished image ' +
       '(or the video URL). Pass app as its number from list_apps, its name, or its id. ' +
-      'Pass only the params you want to change; omitted ones keep their defaults. ' +
-      'A seed of -1 rolls a random seed. Set wait_s to 0 to enqueue and return the prompt_id immediately.',
+      'Call get_app_params first to see the params. Pass only the params you want to change; omitted ones keep ' +
+      'their defaults. A seed of -1 rolls a random seed. Set wait_s to 0 to enqueue and return the prompt_id immediately.',
     inputSchema: {
       type: 'object',
       properties: {
         app: { type: 'string', description: 'Which app to run: its number from list_apps (e.g. "1"), its name, or its id.' },
         values: {
           type: 'object',
-          description: 'Params to fill. Keys are the param name shown by list_apps (e.g. "prompt", "seed"). Omit any you want to leave at its default.',
+          description: 'Params to fill. Keys are the param names shown by get_app_params (e.g. "prompt", "seed"). Omit any you want to leave at its default.',
           additionalProperties: true,
         },
         wait_s: {
@@ -145,7 +159,11 @@ const TOOLS = [
 // Tool handlers.
 // --------------------------------------------------------------------------- #
 function listAppsHandler() {
-  return JSON.stringify(listApps(), null, 2);
+  return JSON.stringify(appCatalog(), null, 2);
+}
+
+function appParamsHandler({ app }) {
+  return JSON.stringify(appParams(app), null, 2);
 }
 
 async function uploadFileHandler({ path: localPath, subfolder }) {
@@ -240,6 +258,7 @@ function handle(msg) {
     const run = async () => {
       switch (name) {
         case 'list_apps': return [{ type: 'text', text: listAppsHandler() }];
+        case 'get_app_params': return [{ type: 'text', text: appParamsHandler(args) }];
         case 'run_app': return runAppHandler(args);
         case 'upload_file': return uploadFileHandler(args);
         case 'download_output': return downloadOutputHandler(args);
