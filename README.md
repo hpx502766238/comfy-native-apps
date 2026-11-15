@@ -2,7 +2,7 @@
 
 [中文文档](README.zh-CN.md)  |  [MCP 客户端配置示例](MCP-CONFIG.zh-CN.md)
 
-A 8-tool MCP server that drives **only** ComfyUI's native `.app.json` apps (the
+A 9-tool MCP server that drives **only** ComfyUI's native `.app.json` apps (the
 built-in "构建应用 / Build App" feature) and manages the render queue. It does the
 UI→API conversion itself and uses only ComfyUI's stable core HTTP API, so it works
 against a **headless** OR a **frontend** ComfyUI — with **zero dependency on the
@@ -17,13 +17,14 @@ Tested against ComfyUI **0.45.3** (frontend 1.58.5) with native `.app.json` apps
 artokun's comfyui-mcp exposes ~38 action-parameterized tools (plus 3 facade meta-tools
 and a 96-tool panel surface). Even its compact mode forces a `list → describe_tool →
 call_tool` chain that a 9B-class local model loops on `describe_tool` forever. This
-server deletes the indirection: the model sees exactly eight single-purpose tools.
+server deletes the indirection: the model sees exactly nine single-purpose tools.
 
 ## Tools
 
 | tool | what it does |
 |------|--------------|
-| `list_apps` | every native `.app.json` app, with its input params (name + type + default) and outputs |
+| `list_apps` | catalog only: number, name, short description and output types of every native `.app.json` app |
+| `get_app_params(app)` | the parameter contract of ONE app: every input param (name + type + default) and its outputs |
 | `run_app(app, values, wait_s?)` | fill only the params you change, convert UI→API, enqueue and wait, return the image (and any string outputs); videos come back as an openable `/view` URL. `wait_s` caps how long it blocks; `0` returns the `prompt_id` immediately |
 | `upload_file(path, subfolder?)` | upload a LOCAL file (image/video/audio/mask) into ComfyUI input dir; returns the ComfyUI-side relative path to pass as a file input value |
 | `download_output(prompt_id, index?, dest?)` | download one finished output to a **local file** (bytes via `/view`), returning the real `saved_to` path. `dest` may be a file, a directory or a relative path; omit it to use `DOWNLOAD_DIR` (default `<cwd>/downloads`). Works for local and remote ComfyUI |
@@ -32,8 +33,10 @@ server deletes the indirection: the model sees exactly eight single-purpose tool
 | `clear_queue` | clear the pending queue |
 | `interrupt` | stop the current generation |
 
-`run_app` `app` may be the number from `list_apps`, the app name, or its id (relative
-workflows path). `values` keys are the friendly param labels (`prompt`, `seed`, …).
+`list_apps` is a catalog only — call `get_app_params(app)` for an app's params, so a
+long app list never buries the model in inputs it does not need. `run_app` `app` may be
+the number from `list_apps`, the app name, or its id (relative workflows path). `values`
+keys are the param labels from `get_app_params` (`prompt`, `seed`, …).
 A `seed` of `-1` rolls a random seed.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
@@ -101,7 +104,7 @@ Wired into this workspace's `.mcp.json` as the server `comfy-native-apps`.
 
 - `comfy_native_apps.mjs` — the MCP stdio server (8 tools, newline-delimited JSON-RPC 2.0)
 - `native_lib.mjs` — workflows discovery, app loading, UI→API conversion, HTTP, queue
-- `drive_safe.mjs` — non-destructive end-to-end test (list_apps + run_app + job_status)
+- `drive_safe.mjs` — non-destructive end-to-end test (list_apps + get_app_params + run_app + job_status)
 
 ## Note on models
 
