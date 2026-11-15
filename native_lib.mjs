@@ -484,14 +484,16 @@ export function listApps() {
 // small model in a wall of inputs.
 export function appCatalog() {
   const { workflowsRoot, apps } = listApps();
-  const list = apps.map((a) => (a.error
-    ? { number: a.number, error: a.error }
-    : {
+  const list = apps.map((a) => {
+    if (a.error) return { number: a.number, error: a.error.replace(`: ${a.file}`, '') };
+    return {
       number: a.number,
       name: a.name,
-      description: a.description,
+      id: a.id,
+      ...(a.description ? { description: a.description } : {}),
       outputs: [...new Set(a.outputs.map((o) => o.type))],
-    }));
+    };
+  });
   const out = { count: list.length, apps: list };
   // Only surface the scan root when nothing was found — that is when it matters.
   if (!list.length) out.workflowsRoot = workflowsRoot;
@@ -506,7 +508,7 @@ export function appParams(ref) {
     number: app.number,
     name: a.name,
     id: a.id,
-    description: a.description,
+    ...(a.description ? { description: a.description } : {}),
     inputs: a.inputs.map((inp) => {
       const p = { name: inp.label, type: inp.type };
       if (inp.default !== null && inp.default !== undefined) p.default = inp.default;
@@ -589,7 +591,7 @@ export async function uploadFile(localPath, subfolder = '') {
   const r = await fetch(BASE + '/upload/image', { method: 'POST', body: form });
   if (!r.ok) throw new Error(`ComfyUI /upload/image HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const j = await r.json();
-  return { name: j.name ?? name, subfolder: j.subfolder ?? '', type: j.type ?? 'input', path: ((j.subfolder ? j.subfolder + '/' : '') + (j.name ?? name)).replace(/\\/g, '/') };
+  return { path: ((j.subfolder ? j.subfolder + '/' : '') + (j.name ?? name)).replace(/\\/g, '/') };
 }
 
 export async function getBytes(p) {
@@ -780,7 +782,7 @@ async function inspectJob(promptId) {
     return {
       prompt_id: id,
       state: 'unknown',
-      hint: 'Use the UUID returned by run_app. A queue number only works while the job is queued; history is cleared after a ComfyUI restart.',
+      hint: 'Pass the UUID prompt_id returned by run_app (unknown, or history cleared).',
     };
   }
   if (e.status?.status_str === 'error') {
@@ -788,7 +790,7 @@ async function inspectJob(promptId) {
     return { prompt_id: id, state: 'error', error, entry: e };
   }
   const outs = Object.entries(e.outputs ?? {})
-    .flatMap(([nid, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ node: nid, key: k, filename: x.filename, subfolder: x.subfolder ?? '', type: x.type ?? 'output' }))));
+    .flatMap(([, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ key: k, filename: x.filename, ...(x.subfolder ? { subfolder: x.subfolder } : {}), type: x.type ?? 'output' }))));
   return { prompt_id: id, state: 'completed', outputs: outs, entry: e };
 }
 
