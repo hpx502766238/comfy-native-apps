@@ -29,6 +29,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 `list_apps` 只返回目录——某个应用的参数要用 `get_app_params(app)` 单独查，这样应用一多也不会用无关的输入项把模型淹没。`run_app` 的 `app` 可以是 `list_apps` 返回的编号、应用名或它的 id（相对 workflows 路径）；**同名应用要用 id 区分**。`inputs` 的键是 `get_app_params` 里的参数名（`prompt`、`seed`、…）。`seed` 设为 `-1` 会掷一个随机种子。
 参数**只能**放在 `inputs` 对象里——顶层多出字段会被当成错误报出来，而不是静默改用默认值；参数名打错也会报错并提示去查 `get_app_params`。两种错误都在入队前拦下。
 `COMBO` 输入**永远**带上 `options`——全部可选值——客户端据此画下拉框、模型直接选值，不用猜文件名；声明成 `STRING` 的端口没有可选值，自然不带。
+显示类节点——`PreviewAny` / `PreviewImage` / `PreviewText` / `ShowText` / `Debug`（提示词预览、分辨率预览之类）——会被从参数列表里**自动过滤**掉：只要一个端口的目标全是这类节点，就当作脚手架而不是参数，`get_app_params` 里不会出现；若它还连着一个真实节点，则保留。
 `job_status` / `download_output` 要的是 `run_app` 返回的 **UUID prompt_id**；`queue_status` 里的 `queue_number` 只是队列序号，仅任务排队期间可当作快捷方式使用。
 `queue_status` 的 `recent` 读的是 ComfyUI 的 `/history`（ComfyUI 重启后清空），每条只给 `prompt_id`、`state`、输出文件名和完成时间；要某个历史任务的完整结果仍用 `job_status`。
 **下载**：`download_output` 会把文件真正写到本地（从 `/view` 取字节），返回 `saved_to`。`dest` 传文件路径（`E:/out/clip.mp4`，可顺便改名）、目录（`E:/out`、`E:/out/`，没有扩展名也按目录处理）或相对路径（相对 MCP 进程的 cwd）；省略则写到 `DOWNLOAD_DIR`。文件落在 **MCP 服务端所在机器**，远程 ComfyUI 也一样。
