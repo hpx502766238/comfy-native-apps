@@ -13,6 +13,7 @@
 //                                     types for every native .app.json app
 //   get_app_params(app)            -> the parameter contract of ONE app
 //                                     (input name + type + default, outputs)
+//                                     COMBO inputs also carry their full options list
 //   run_app(app, inputs, wait_s?)  -> fill only the params you want to change,
 //                                     convert UI→API, enqueue, wait, return the
 //                                     image (or the video URL); wait_s: 0 = submit only
@@ -55,6 +56,7 @@ const TOOLS = [
   {
     name: 'get_app_params',
     description: 'Show the parameter contract of ONE app: every input param (name, type, default) and its outputs. ' +
+      'COMBO inputs also carry their full "options" list so you can pick a value instead of guessing a filename. ' +
       'Call this after list_apps and before run_app to see which params exist.',
     inputSchema: {
       type: 'object',
@@ -164,8 +166,8 @@ function listAppsHandler() {
   return JSON.stringify(appCatalog(), null, 2);
 }
 
-function appParamsHandler({ app }) {
-  return JSON.stringify(appParams(app), null, 2);
+async function appParamsHandler({ app }) {
+  return JSON.stringify(await appParams(app), null, 2);
 }
 
 async function uploadFileHandler({ path: localPath, subfolder }) {
@@ -283,7 +285,7 @@ function handle(msg) {
     const run = async () => {
       switch (name) {
         case 'list_apps': return [{ type: 'text', text: listAppsHandler() }];
-        case 'get_app_params': return [{ type: 'text', text: appParamsHandler(args) }];
+        case 'get_app_params': return [{ type: 'text', text: await appParamsHandler(args) }];
         case 'run_app': return runAppHandler(args);
         case 'upload_file': return uploadFileHandler(args);
         case 'download_output': return downloadOutputHandler(args);

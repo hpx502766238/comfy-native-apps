@@ -501,9 +501,36 @@ export function appCatalog() {
 }
 
 // get_app_params payload: the full parameter contract of ONE app.
-export function appParams(ref) {
+// COMBO inputs always carry their `options` — the full list of legal values,
+// pulled from /object_info so a client can show a real dropdown and a model can
+// pick without guessing filenames. (Only real COMBOS have one: a port declared
+// STRING carries no choices.)
+export async function appParams(ref) {
   const app = resolveAppRef(ref);
   const a = loadNativeApp(app.file);
+  // The node types behind this app's COMBO ports, deduped.
+  const comboPorts = a.inputs.filter((p) => p.type === 'COMBO');
+  const nodeTypes = new Set();
+  for (const p of comboPorts) for (const t of p.targets ?? []) {
+    const type = a.nodesById.get(t.nodeId)?.type;
+    if (type) nodeTypes.add(type);
+  }
+  const specs = {};
+  await Promise.all([...nodeTypes].map(async (t) => {
+    try { specs[t] = (await getJson(`/object_info/${encodeURIComponent(t)}`))[t]?.input; } catch { specs[t] = null; }
+  }));
+  const optionsOf = (port) => {
+    for (const t of port.targets ?? []) {
+      const type = a.nodesById.get(t.nodeId)?.type;
+      const spec = type ? specs[type] : undefined;
+      // object_info wraps sockets under required/optional/hidden; the combo value is
+      // [options-array, extra-dict] — or a bare list when there is no extra dict.
+      const raw = spec?.required?.[t.socket] ?? spec?.optional?.[t.socket] ?? spec?.hidden?.[t.socket];
+      const opts = Array.isArray(raw?.[0]) ? raw[0] : Array.isArray(raw) ? raw : undefined;
+      if (Array.isArray(opts)) return opts;
+    }
+    return null;
+  };
   return {
     number: app.number,
     name: a.name,
@@ -512,6 +539,10 @@ export function appParams(ref) {
     inputs: a.inputs.map((inp) => {
       const p = { name: inp.label, type: inp.type };
       if (inp.default !== null && inp.default !== undefined) p.default = inp.default;
+      if (inp.type === 'COMBO') {
+        const opts = optionsOf(inp);
+        if (opts?.length) p.options = opts;
+      }
       return p;
     }),
     outputs: a.outputs.map((o) => ({ name: o.name, type: o.type })),
