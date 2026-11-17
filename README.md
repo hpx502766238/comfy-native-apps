@@ -44,6 +44,10 @@ silently-ignored default, and a mistyped param name is reported with a pointer t
 A `COMBO` input always carries `options` — the full list of legal values — so a client
 can render a real dropdown and a model can pick without guessing filenames (a port
 declared `STRING` has no choices).
+Display-only nodes — `PreviewAny` / `PreviewImage` / `PreviewText` / `ShowText` / `Debug`
+(prompt/resolution preview, etc.) — are stripped from the param list: a port whose targets
+are *all* of those kinds is scaffolding, not a parameter, so it never shows up. A port that
+also feeds a real node is kept.
 `job_status` / `download_output` take the **UUID prompt_id** returned by `run_app`; the `queue_number` from `queue_status` is just a queue position and only works as a shortcut while the job is queued.
 `queue_status` reads `recent` from ComfyUI's `/history` (cleared when ComfyUI restarts). Each entry only carries `prompt_id`, `state`, output filenames and the finish time; use `job_status` for the full result of one history job.
 **Download**: `download_output` now writes the file to disk (bytes over `/view`) and returns `saved_to`. `dest` may be a file path (`E:/out/clip.mp4`, rename on the way), a directory (`E:/out`, `E:/out/`; no extension also means directory) or a relative path (against the MCP process cwd); omit it to use `DOWNLOAD_DIR`. The file lands on the **machine running this MCP server**, remote ComfyUI included.

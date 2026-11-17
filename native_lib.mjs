@@ -104,9 +104,23 @@ export function loadNativeApp(file) {
   const refNode = (raw.nodes ?? []).find((n) => n.type === sg.id);
   const portValues = refNode?.widgets_values_named ?? {};
 
+  // Display-only nodes: they draw a widget or an image on the canvas for a human
+  // to look at, but produce no value the workflow uses. If an author exposes one
+  // as an input port (a "prompt preview" / "resolution preview"), it is scaffolding,
+  // not a parameter — dropping it keeps get_app_params clean. A port is dropped
+  // only when ALL of its targets are display-only, so a real node that happens to
+  // feed a preview alongside it is never mistaken for one.
+  const DISPLAY_NODE_TYPES = new Set(['PreviewAny', 'PreviewImage', 'PreviewText', 'ShowText', 'Debug']);
+
   // Exposed INPUT ports. A port's link lands on an internal node's widget — that
   // (node, widget) pair is exactly where the model's value must go.
-  const inputs = (sg.inputs ?? []).map((p) => {
+  const inputs = (sg.inputs ?? [])
+    .filter((p) => !(p.linkIds ?? []).length || (p.linkIds ?? []).some((lid) => {
+      const l = linksById.get(lid);
+      const n = l ? nodesById.get(l.target_id) : undefined;
+      return n && !DISPLAY_NODE_TYPES.has(n.type);
+    }))
+    .map((p) => {
     const link = p.linkIds?.[0] != null ? linksById.get(p.linkIds[0]) : undefined;
     const target = link ? nodesById.get(link.target_id) : undefined;
     const socket = target?.inputs?.[link.target_slot]?.name ?? null;
