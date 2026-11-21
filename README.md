@@ -70,6 +70,7 @@ converts the subgraph's `nodes` + `links` to an API-format prompt:
 - top-level saver nodes (`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …) are converted too — a native app keeps them outside the subgraph, and converting only the subgraph left video apps with a pile of loose PNG frames. A synthetic `SaveImage` / `SaveAnimatedWEBM` is only attached when an output has no real sink; a `PreviewImage` counts as a sink (the author chose not to persist that output, and its temp file is still downloadable from `/history`)
 - filename tokens such as `%date:yyyy-MM-dd%` are expanded (the web frontend does this before submitting; the raw API does not)
 - a nested subgraph reference (`class_type` is a subgraph UUID) cannot be executed through the API, so conversion stops there and falls back to the synthetic saver
+- a media input port (`IMAGE` / `MASK` / `VIDEO` / `AUDIO`) is a file, not a literal: the path goes to the filename widget of the top-level loader (`LoadImage`, `LoadVideo`, `LoadAudio`, …) that feeds the subgraph reference node, and the internal consumers link to that loader's output. A port with no external loader gets a synthetic `LoadImage`; a filename is never written onto an `IMAGE` socket
 
 **Where a port's real value lives.** In app mode the exposed input ports' *configured*
 values are stored on the subgraph **reference node** — the top-level node whose `type`
@@ -80,7 +81,8 @@ node+socket the port feeds (as pre-populated overrides), so the app runs with th
 the user actually set — including model paths with their subfolder prefix (e.g.
 `zimage\z_image_turbo_int8_convrot.safetensors`). A port can fan out to several nodes (one
 "channel" string driving two `BranchNode`s, say); all of them receive the value, and user
-`run_app` values layer on top the same way.
+`run_app` values layer on top the same way. Media ports are the exception: their value is a
+file, so it is routed to the loader's filename widget instead of the internal `IMAGE` socket.
 
 Because the conversion happens here, the same `run_app` works whether ComfyUI is
 headless (`--front-end-version 0`, no UI) or running the web frontend — only the core
@@ -115,6 +117,7 @@ Wired into this workspace's `.mcp.json` as the server `comfy-native-apps`.
 - `comfy_native_apps.mjs` — the MCP stdio server (8 tools, newline-delimited JSON-RPC 2.0)
 - `native_lib.mjs` — workflows discovery, app loading, UI→API conversion, HTTP, queue
 - `drive_safe.mjs` — non-destructive end-to-end test (list_apps + get_app_params + run_app + job_status)
+- `assert_media.mjs` — offline assertions for the media-port conversion (no ComfyUI needed): `node assert_media.mjs`
 
 ## Note on models
 

@@ -49,8 +49,9 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 - 顶层保存节点（`SaveImage` / `SaveImageAdvanced` / `VHS_VideoCombine` / `SaveVideo` / `SaveAnimatedWEBM` …）也会被转换——原生 app 把它们留在子图外面，只转子图会导致视频 app 只落一堆 PNG 帧。只有该输出没有任何真实落点时才挂一个合成的 `SaveImage` / `SaveAnimatedWEBM`；`PreviewImage` 也算落点（作者本就不想持久化这份输出，它的临时文件仍可从 `/history` 下载）
 - 文件名里的 `%date:yyyy-MM-dd%` 一类令牌会被展开（这是前端提交前做的，直连 API 不会）
 - 嵌套子图引用（`class_type` 是子图 UUID）无法直接下发给 API，转换会停在那里并回退到兜底保存
+- 媒体输入端口（`IMAGE` / `MASK` / `VIDEO` / `AUDIO`）传的是文件而不是字面值：路径写进子图引用节点上游的顶层加载器（`LoadImage`、`LoadVideo`、`LoadAudio` …）的文件名控件，内部消费者则连到该加载器的输出。端口没有外部加载器时合成一个 `LoadImage`；文件名永远不会被写进 `IMAGE` socket
 
-**端口的真实值存在哪。** 在 app 模式下，暴露的输入端口的*已配置*值存放在 subgraph **引用节点**上——即那个 `type` 等于 subgraph id 的顶层节点——在其 `widgets_values_named` 里，以端口*名称*为键。内部节点（如 `UNETLoader`）保存的是模板的原始默认值，可能是过期的。本服务器从引用节点读取端口值，并把它们应用到该端口所填充的**每一个**内部节点+socket 上（作为预填的覆盖值），这样应用就能用用户真正设置的值运行——包括带子目录前缀的模型路径（例如 `zimage\z_image_turbo_int8_convrot.safetensors`）。一个端口可以扇出到多个节点（比如一个"通道"字符串同时驱动两个 `BranchNode`），它们都会收到这个值；用户的 `run_app` 值同样会扇出叠加。
+**端口的真实值存在哪。** 在 app 模式下，暴露的输入端口的*已配置*值存放在 subgraph **引用节点**上——即那个 `type` 等于 subgraph id 的顶层节点——在其 `widgets_values_named` 里，以端口*名称*为键。内部节点（如 `UNETLoader`）保存的是模板的原始默认值，可能是过期的。本服务器从引用节点读取端口值，并把它们应用到该端口所填充的**每一个**内部节点+socket 上（作为预填的覆盖值），这样应用就能用用户真正设置的值运行——包括带子目录前缀的模型路径（例如 `zimage\z_image_turbo_int8_convrot.safetensors`）。一个端口可以扇出到多个节点（比如一个"通道"字符串同时驱动两个 `BranchNode`），它们都会收到这个值；用户的 `run_app` 值同样会扇出叠加。媒体端口是例外：它的值是文件，会被路由到加载器的文件名控件，而不是内部 `IMAGE` socket。
 
 因为转换发生在这里，同一个 `run_app` 无论 ComfyUI 是无头模式（`--front-end-version 0`，无 UI）还是跑着 Web 前端都能用——只碰核心 API。`.app.json` 文件直接从磁盘读取。
 

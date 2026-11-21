@@ -77,6 +77,32 @@ export function findNativeApps(root) {
 }
 
 // --------------------------------------------------------------------------- #
+// Media ports. An IMAGE/MASK/VIDEO/AUDIO port carries a *file*, and the file is
+// owned by a top-level loader node outside the subgraph (the app author wires a
+// LoadImage into the subgraph reference node). Writing the filename onto the
+// IMAGE socket inside the subgraph hands a string to a node that expects a
+// tensor, so media values are routed to the loader widget instead.
+// --------------------------------------------------------------------------- #
+const MEDIA_TYPES = new Set(['IMAGE', 'MASK', 'VIDEO', 'AUDIO']);
+const MEDIA_OVERRIDE_PREFIX = '@media:';
+const LOADER_WIDGETS = {
+  LoadImage: 'image',
+  LoadImageMask: 'image',
+  LoadVideo: 'file',
+  LoadAudio: 'audio',
+  VHS_LoadVideo: 'video',
+  VHS_LoadAudio: 'audio',
+};
+const loaderWidgetOf = (n) => {
+  if (!n) return null;
+  if (LOADER_WIDGETS[n.type]) return LOADER_WIDGETS[n.type];
+  // LoadImageOutput reads the OUTPUT dir, not the input dir an upload lands in.
+  if (n.type === 'LoadImageOutput' || !/Load/i.test(String(n.type ?? ''))) return null;
+  const w = (n.inputs ?? []).find((i) => i.widget && ['image', 'file', 'audio', 'video'].includes(i.name));
+  return w ? w.name : null;
+};
+
+// --------------------------------------------------------------------------- #
 // Load a native app: extract the subgraph, its ports, and a link/node index.
 // --------------------------------------------------------------------------- #
 export function loadNativeApp(file) {
@@ -95,7 +121,10 @@ export function loadNativeApp(file) {
   const topLinks = (raw.links ?? []).map((l) => Array.isArray(l)
     ? { id: l[0], origin_id: l[1], origin_slot: l[2], target_id: l[3], target_slot: l[4], type: l[5] }
     : l);
+  const topById = new Map(topNodes.map((n) => [n.id, n]));
+  const topLinksById = new Map(topLinks.map((l) => [l.id, l]));
   const shellIn = sg.inputNode?.id ?? -10;
+  const nestedIds = new Set((raw.definitions?.subgraphs ?? []).map((s) => s.id));
 
   // The subgraph REFERENCE node (top-level node whose type is the subgraph's id)
   // holds the app's actual I/O values in its widgets, keyed by PORT NAME. This is
@@ -103,6 +132,78 @@ export function loadNativeApp(file) {
   // widget (e.g. a UNETLoader's template default) may be stale/different.
   const refNode = (raw.nodes ?? []).find((n) => n.type === sg.id);
   const portValues = refNode?.widgets_values_named ?? {};
+  const refInputs = refNode?.inputs ?? [];
+
+  // A bypassed node (mode 4) is absent from the API prompt: ComfyUI forwards an
+  // input of the same type to its output. Resolve such a link to the real source.
+  const resolveOrigin = (originId, originSlot) => {
+    const seen = new Set();
+    let id = originId;
+    let slot = originSlot;
+    for (;;) {
+      const n = topById.get(id);
+      if (!n || n.mode !== 4) return { nodeId: id, slot };
+      if (seen.has(id)) return null;
+      seen.add(id);
+      const outType = n.outputs?.[slot]?.type;
+      const idx = (n.inputs ?? []).findIndex((i) => i.type === outType && i.link != null);
+      const inLink = idx >= 0 ? topLinksById.get(n.inputs[idx].link) : undefined;
+      if (!inLink || inLink.origin_id === refNode?.id) return null;
+      id = inLink.origin_id;
+      slot = inLink.origin_slot;
+    }
+  };
+  const upstreamOf = (id) => {
+    const out = [];
+    for (const l of topLinks) {
+      if (l.target_id !== id || l.origin_id === refNode?.id) continue;
+      const src = resolveOrigin(l.origin_id, l.origin_slot);
+      if (src) out.push(src.nodeId);
+    }
+    return out;
+  };
+
+  // Follow a media port out of the subgraph: the port's shell link names the ref
+  // node input slot, whose top-level link is the feed (e.g. LoadImage #140, or
+  // Canny #57 fed by LoadImage #58). Returns the feed output, every top-level
+  // node needed to produce it, and the nearest upstream loader that owns the
+  // filename widget.
+  const mediaFeed = (p) => {
+    const shellLink = (p.linkIds ?? []).map((id) => linksById.get(id)).find((l) => l && l.origin_id === shellIn);
+    const refInput = (shellLink ? refInputs[shellLink.origin_slot] : null) ?? refInputs.find((i) => i.name === p.name);
+    const topLink = refInput?.link != null ? topLinksById.get(refInput.link) : undefined;
+    if (!topLink) return { feed: null, chain: [], loader: null };
+    const feed = resolveOrigin(topLink.origin_id, topLink.origin_slot);
+    if (!feed) return { feed: null, chain: [], loader: null };
+
+    const chain = new Set();
+    const queue = [feed.nodeId];
+    while (queue.length) {
+      const id = queue.shift();
+      const n = topById.get(id);
+      if (!n || chain.has(id) || (n.mode != null && n.mode !== 0) || nestedIds.has(n.type)) continue;
+      chain.add(id);
+      for (const src of upstreamOf(id)) queue.push(src);
+    }
+    // A feed through a nested subgraph cannot be expressed in an API prompt; fall
+    // back to the no-feed path rather than link to a node that will not exist.
+    if (!chain.has(feed.nodeId)) return { feed: null, chain: [], loader: null };
+
+    let loader = null;
+    const seen = new Set();
+    queue.push(feed.nodeId);
+    while (queue.length && !loader) {
+      const id = queue.shift();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const n = topById.get(id);
+      if (!n) continue;
+      const widget = loaderWidgetOf(n);
+      if (widget) loader = { nodeId: id, widget };
+      else for (const src of upstreamOf(id)) queue.push(src);
+    }
+    return { feed, chain: [...chain], loader };
+  };
 
   // Display-only nodes: they draw a widget or an image on the canvas for a human
   // to look at, but produce no value the workflow uses. If an author exposes one
@@ -132,6 +233,8 @@ export function loadNativeApp(file) {
       const s = l ? nodesById.get(l.target_id)?.inputs?.[l.target_slot]?.name : undefined;
       if (s) targets.push({ nodeId: l.target_id, socket: s });
     }
+    const media = MEDIA_TYPES.has(p.type);
+    const ext = media ? mediaFeed(p) : null;
     return {
       portId: p.id,
       portName: p.name,
@@ -139,6 +242,7 @@ export function loadNativeApp(file) {
       type: p.type,
       targets,
       default: p.name in portValues ? portValues[p.name] : (socket && socket in named ? named[socket] : null),
+      ...(ext ? { media: true, feed: ext.feed, chain: ext.chain, loader: ext.loader } : {}),
     };
   });
 
@@ -149,6 +253,9 @@ export function loadNativeApp(file) {
   // would otherwise fall back to their own stale saved widget.
   const portOverrides = new Map();
   for (const p of sg.inputs ?? []) {
+    // Media ports never take a literal from the ref node widget: their value is a
+    // filename owned by the top-level loader (see mediaFeed above).
+    if (MEDIA_TYPES.has(p.type)) continue;
     if (!(p.name in portValues)) continue;
     for (const lid of p.linkIds ?? []) {
       const link = linksById.get(lid);
@@ -182,7 +289,7 @@ export function loadNativeApp(file) {
     // Ids of every subgraph defined in the file. A top-level node whose type is
     // one of these is a NESTED subgraph reference: it cannot be sent to the API
     // as-is (its class_type would be a UUID), so the converter stops there.
-    subgraphIds: (raw.definitions?.subgraphs ?? []).map((s) => s.id),
+    subgraphIds: [...nestedIds],
     nodesById,
     linksById,
     topNodes,
@@ -262,13 +369,58 @@ const asWidgetValue = (v) => (Array.isArray(v) ? { __value__: v } : v);
 export function graphToPrompt(app, overrides) {
   const { nodesById, linksById, shellIn } = app;
   // Port values (from the subgraph ref node) are the baseline; user overrides win.
+  // Media overrides arrive as `@media:<portId>` and are routed below, not applied
+  // as literals: their value is a filename for a loader, never an IMAGE socket.
   const eff = new Map(app.portOverrides ?? []);
-  for (const [k, v] of overrides ?? []) eff.set(k, v);
+  const mediaValues = new Map();
+  for (const [k, v] of overrides ?? []) {
+    if (k.startsWith(MEDIA_OVERRIDE_PREFIX)) mediaValues.set(k.slice(MEDIA_OVERRIDE_PREFIX.length), v);
+    else eff.set(k, v);
+  }
+  // Top-level node ids live in a different namespace than the subgraph's internal
+  // ids even in the UI, so prefix them to guarantee no key collision in the API prompt.
+  const topKey = (id) => `t${id}`;
+
+  // Media ports: internal consumers link to the top-level feed (or a synthetic
+  // LoadImage); a supplied filename goes on the loader's widget. Ports fed from
+  // outside keep working with their saved image even when no value is supplied.
+  const mediaLinks = new Map();
+  const topWidgetOverrides = new Map();
+  const feedReach = new Set();
+  const syntheticLoads = [];
+  let synthLoadId = 999100;
+  for (const p of app.inputs) {
+    if (!p.media) continue;
+    const value = mediaValues.get(p.portId);
+    let target = p.feed;
+    let synthetic = false;
+    if (value !== undefined) {
+      if (p.loader) {
+        let m = topWidgetOverrides.get(p.loader.nodeId);
+        if (!m) topWidgetOverrides.set(p.loader.nodeId, (m = new Map()));
+        m.set(p.loader.widget, String(value));
+      } else {
+        const type = p.type === 'AUDIO' ? 'LoadAudio' : p.type === 'VIDEO' ? 'LoadVideo' : 'LoadImage';
+        const widget = p.type === 'AUDIO' ? 'audio' : p.type === 'VIDEO' ? 'file' : 'image';
+        const id = ++synthLoadId;
+        syntheticLoads.push({ id, type, widget, value: String(value) });
+        target = { nodeId: id, slot: p.type === 'MASK' ? 1 : 0 };
+        synthetic = true;
+      }
+    }
+    if (!target) continue;
+    if (!synthetic) for (const id of p.chain ?? []) feedReach.add(id);
+    const linkId = synthetic ? String(target.nodeId) : topKey(target.nodeId);
+    for (const t of p.targets ?? []) mediaLinks.set(`${t.nodeId}:${t.socket}`, [linkId, target.slot]);
+  }
   const prompt = {};
+  for (const s of syntheticLoads) prompt[s.id] = { class_type: s.type, inputs: { [s.widget]: s.value } };
   for (const n of nodesById.values()) {
     const named = n.widgets_values_named ?? {};
     const inputs = {};
     for (const s of n.inputs ?? []) {
+      const ml = mediaLinks.get(`${n.id}:${s.name}`);
+      if (ml) { inputs[s.name] = ml; continue; }
       const ov = eff.get(`${n.id}:${s.name}`);
       if (ov !== undefined) { inputs[s.name] = ov; continue; }
       if (s.link != null) {
@@ -303,14 +455,31 @@ export function graphToPrompt(app, overrides) {
   const topNodes = app.topNodes ?? [];
   const topLinks = app.topLinks ?? [];
   const topById = new Map(topNodes.map((n) => [n.id, n]));
+  const topLinksById = new Map(topLinks.map((l) => [l.id, l]));
   const nestedIds = new Set(app.subgraphIds ?? []);
+  // Bypassed nodes (mode 4) never reach the API prompt; follow their same-type
+  // input to the real source so a consumer still gets a valid link.
+  const resolveOrigin = (originId, originSlot) => {
+    const seen = new Set();
+    let id = originId;
+    let slot = originSlot;
+    for (;;) {
+      const n = topById.get(id);
+      if (!n || n.mode !== 4) return { nodeId: id, slot };
+      if (seen.has(id)) return null;
+      seen.add(id);
+      const outType = n.outputs?.[slot]?.type;
+      const idx = (n.inputs ?? []).findIndex((i) => i.type === outType && i.link != null);
+      const inLink = idx >= 0 ? topLinksById.get(n.inputs[idx].link) : undefined;
+      if (!inLink || inLink.origin_id === refId) return null;
+      id = inLink.origin_id;
+      slot = inLink.origin_slot;
+    }
+  };
   // Only "always" nodes are converted. A node whose type is a subgraph UUID is a
   // nested subgraph reference — the API can't execute it, so the chain stops here
   // (the output falls back to a synthetic saver instead of an invalid prompt).
   const isActive = (n) => !!n && (n.mode === undefined || n.mode === null || n.mode === 0) && !nestedIds.has(n.type);
-  // Top-level node ids live in a different namespace than the subgraph's internal
-  // ids even in the UI, so prefix them to guarantee no key collision in the API prompt.
-  const topKey = (id) => `t${id}`;
 
   // Nodes downstream of one specific subgraph output port (index = ref output slot).
   const reachFromSlot = (slot) => {
@@ -334,6 +503,8 @@ export function graphToPrompt(app, overrides) {
   const perPortReach = app.outputs.map((_, i) => reachFromSlot(i));
   const allReach = new Set();
   for (const r of perPortReach) for (const id of r) allReach.add(id);
+  // Downstream saver chain + upstream media-feed chain (LoadImage -> preprocessor).
+  const converted = new Set([...allReach, ...feedReach]);
 
   // Literal value of a helper node that stayed outside the converted set
   // (e.g. PrimitiveFloat -> VHS_VideoCombine.frame_rate). Only primitive-style
@@ -361,22 +532,24 @@ export function graphToPrompt(app, overrides) {
     return { ...out, ...(n.widgets_values_named ?? {}) };
   };
 
-  for (const id of allReach) {
+  for (const id of converted) {
     const n = topById.get(id);
     if (!n) continue;
     const named = widgetMapOf(n);
     const inputs = {};
     for (const s of n.inputs ?? []) {
       if (s.link != null) {
-        const l = topLinks.find((x) => x.id === s.link);
+        const l = topLinksById.get(s.link);
         if (!l) continue;
-        if (l.origin_id === refId) {
-          const port = app.outputs[l.origin_slot];
+        const src = resolveOrigin(l.origin_id, l.origin_slot);
+        if (!src) continue;
+        if (src.nodeId === refId && !feedReach.has(id)) {
+          const port = app.outputs[src.slot];
           if (port && port.producerNodeId != null) inputs[s.name] = [String(port.producerNodeId), port.producerSlot];
-        } else if (allReach.has(l.origin_id)) {
-          inputs[s.name] = [topKey(l.origin_id), l.origin_slot];
+        } else if (converted.has(src.nodeId)) {
+          inputs[s.name] = [topKey(src.nodeId), src.slot];
         } else {
-          const origin = topById.get(l.origin_id);
+          const origin = topById.get(src.nodeId);
           const v = origin ? literalOf(origin) : null;
           if (v !== null && v !== undefined) inputs[s.name] = v;
         }
@@ -392,6 +565,8 @@ export function graphToPrompt(app, overrides) {
       if (/preview/i.test(k)) continue;
       inputs[k] = asWidgetValue(v);
     }
+    // A supplied media path wins over the loader's saved widget value.
+    for (const [k, v] of topWidgetOverrides.get(n.id) ?? []) inputs[k] = asWidgetValue(v);
     prompt[topKey(n.id)] = { class_type: n.type, inputs };
   }
 
@@ -453,16 +628,22 @@ export function buildOverrides(app, values) {
   for (const [rawKey, rawVal] of Object.entries(values ?? {})) {
     const key = String(rawKey).trim();
     const m = /^(\d+):(.+)$/.exec(key) || /^(\d+)\.(.+)$/.exec(key);
-    let targets, type;
+    let port, targets, type;
     if (m) {
-      const p = app.inputs.find((i) => (i.targets ?? []).some((t) => String(t.nodeId) === m[1] && t.socket === m[2]));
-      targets = p?.targets ?? [{ nodeId: m[1], socket: m[2] }];
-      type = p?.type;
+      port = app.inputs.find((i) => (i.targets ?? []).some((t) => String(t.nodeId) === m[1] && t.socket === m[2]));
+      targets = port?.targets ?? [{ nodeId: m[1], socket: m[2] }];
+      type = port?.type;
     } else {
-      const p = byLabel.get(key);
-      if (!p) throw new Error(`unknown param "${key}" — call get_app_params("${app.name}") for its parameter list`);
-      targets = p.targets ?? [];
-      type = p.type;
+      port = byLabel.get(key);
+      if (!port) throw new Error(`unknown param "${key}" — call get_app_params("${app.name}") for its parameter list`);
+      targets = port.targets ?? [];
+      type = port.type;
+    }
+    if (port?.media) {
+      // A media value is a filename for the port's loader, not a literal for the
+      // IMAGE socket the port feeds. graphToPrompt routes it to the loader widget.
+      ov.set(MEDIA_OVERRIDE_PREFIX + port.portId, String(rawVal));
+      continue;
     }
     if (!targets.length) throw new Error(`param "${key}" has no internal target`);
     let v = rawVal;
