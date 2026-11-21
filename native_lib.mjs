@@ -288,8 +288,10 @@ export function loadNativeApp(file) {
     refNodeId: refNode ? refNode.id : null,
     // Ids of every subgraph defined in the file. A top-level node whose type is
     // one of these is a NESTED subgraph reference: it cannot be sent to the API
-    // as-is (its class_type would be a UUID), so the converter stops there.
+    // as-is (its class_type would be a UUID), so the converter inlines it
+    // (graphToPrompt) instead of sending a UUID class_type.
     subgraphIds: [...nestedIds],
+    subgraphs: raw.definitions?.subgraphs ?? [],
     nodesById,
     linksById,
     topNodes,
@@ -532,27 +534,147 @@ export function graphToPrompt(app, overrides) {
     return { ...out, ...(n.widgets_values_named ?? {}) };
   };
 
-  for (const id of converted) {
+  // ----------------------------------------------------------------------- #
+  // Nested subgraph references: a top-level node whose type is ANOTHER
+  // subgraph's UUID. The API can't run a UUID class_type and the ref node is
+  // only a shell — the frontend expands it into its internal nodes, so we do
+  // the same: convert the subgraph's real nodes under a `n<refId>_<id>` key and
+  // resolve its I/O to the internal producers / the ref node's own input links.
+  // ----------------------------------------------------------------------- #
+  const mainSgId = app.subgraphs?.[0]?.id;
+  const nestedSubgraphOf = (n) => {
+    if (!n || n.id === refId || n.type === mainSgId) return null;
+    return nestedIds.has(n.type) ? (app.subgraphs ?? []).find((s) => s.id === n.type) ?? null : null;
+  };
+  // Resolve a TOP-LEVEL link to its API value, transparently expanding a nested
+  // subgraph ref and a bypassed node. consumerTopId is the node being fed, so a
+  // media-feed node never re-resolves its own ref-origin to a subgraph output.
+  const resolveTopSource = (topLink, consumerTopId) => {
+    if (!topLink) return null;
+    const src = resolveOrigin(topLink.origin_id, topLink.origin_slot);
+    if (!src) return null;
+    if (src.nodeId === refId && !(consumerTopId != null && feedReach.has(consumerTopId))) {
+      const port = app.outputs[src.slot];
+      return port && port.producerNodeId != null ? [String(port.producerNodeId), port.producerSlot] : null;
+    }
+    const out = inlineNested(src.nodeId);
+    if (out) {
+      const pr = out[src.slot];
+      return pr ? [pr.key, pr.slot] : null;
+    }
+    if (converted.has(src.nodeId)) return [topKey(src.nodeId), src.slot];
+    const origin = topById.get(src.nodeId);
+    const v = origin ? literalOf(origin) : null;
+    return v !== null && v !== undefined ? v : null;
+  };
+  const nestedCache = new Map(); // refNodeId -> [{key,slot}] per output slot, or null
+  const inlineNested = (refNodeId) => {
+    if (nestedCache.has(refNodeId)) return nestedCache.get(refNodeId);
+    const n = topById.get(refNodeId);
+    const sg = n ? nestedSubgraphOf(n) : null;
+    if (!sg) { nestedCache.set(refNodeId, null); return null; }
+    const byId = new Map((sg.nodes ?? []).map((x) => [x.id, x]));
+    const linkById = new Map((sg.links ?? []).map((l) => [l.id, l]));
+    const shellInId = sg.inputNode?.id ?? -10;
+    const prefix = `n${refNodeId}_`;
+    // The ref node's own widgets hold the app's ACTUAL configured values (the
+    // internal nodes keep the subgraph template's stale defaults), so a shell
+    // widget port resolves to the ref value first, then the internal default.
+    const refWidgets = n.widgets_values_named ?? {};
+    // ref node output slot -> internal producer (prompt key, slot).
+    const out = [];
+    for (let slot = 0; slot < (sg.outputs ?? []).length; slot++) {
+      const l = sg.outputs[slot].linkIds?.[0] != null ? linkById.get(sg.outputs[slot].linkIds[0]) : undefined;
+      out[slot] = l && byId.has(l.origin_id) ? { key: prefix + l.origin_id, slot: l.origin_slot } : null;
+    }
+    for (const inn of sg.nodes ?? []) {
+      const named = inn.widgets_values_named ?? {};
+      const inputs = {};
+      for (const s of inn.inputs ?? []) {
+        const l = s.link != null ? linkById.get(s.link) : undefined;
+        if (l && l.origin_id === shellInId) {
+          // Exposed input port: the shell link's origin_slot is the ref node's
+          // input slot. If that socket is itself linked (image/alpha/multiplier),
+          // the real source is the top-level link off the ref node. If it is a
+          // plain widget (seed/sampler/vae_name/…), the ref node's own value is
+          // the authoritative one, else the internal template default.
+          const refSock = n.inputs?.[l.origin_slot];
+          const src = refSock?.link != null ? resolveTopSource(topLinksById.get(refSock.link)) : undefined;
+          if (src !== undefined) {
+            inputs[s.name] = src ?? (s.name in named ? asWidgetValue(named[s.name]) : null);
+          } else {
+            const portName = refSock?.name ?? s.name;
+            inputs[s.name] = portName in refWidgets ? asWidgetValue(refWidgets[portName]) : (s.name in named ? asWidgetValue(named[s.name]) : null);
+          }
+        } else if (l && byId.has(l.origin_id)) {
+          inputs[s.name] = [prefix + l.origin_id, l.origin_slot];
+        } else {
+          inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
+        }
+      }
+      for (const [k, v] of Object.entries(named)) if (!(k in inputs)) inputs[k] = asWidgetValue(v);
+      prompt[prefix + inn.id] = { class_type: inn.type, inputs };
+    }
+    nestedCache.set(refNodeId, out);
+    return out;
+  };
+
+  // Nested refs downstream of a subgraph output: reach them, but stop there —
+  // their internals are a separate graph inlined by inlineNested.
+  const nestedRefIds = new Set();
+  {
+    const q = [refId];
+    const seen = new Set([refId]);
+    while (q.length) {
+      const cur = q.shift();
+      for (const l of topLinks) {
+        if (l.origin_id !== cur || seen.has(l.target_id)) continue;
+        const t = topById.get(l.target_id);
+        if (!t) continue;
+        seen.add(l.target_id);
+        if (nestedSubgraphOf(t)) nestedRefIds.add(l.target_id);
+        else if (t.mode == null || t.mode === 0) q.push(l.target_id);
+      }
+    }
+  }
+  // Pull the FULL upstream closure of everything we convert. A socket whose
+  // source is a computed top-level node (ComfySwitchNode, ResolutionSelector,
+  // GetImageSize, BranchNode, PrimitiveBoolean, …) must be emitted as a real
+  // node reference — guessing a literal from its widgets yields garbage (e.g.
+  // the 输出宽度 switch literalizing to `true` inside the resize-multiplier
+  // NumberCalculator), which poisons the whole downstream saver chain. Nested
+  // refs' direct feeders AND their feeders' feeders are included recursively;
+  // the main subgraph ref (refId) is the terminal.
+  {
+    const q = [];
+    const queued = new Set();
+    const enqueue = (id) => { if (id === refId || queued.has(id)) return; queued.add(id); q.push(id); };
+    for (const id of new Set([...converted, ...nestedRefIds])) enqueue(id);
+    for (let i = 0; i < q.length; i++) {
+      const n = topById.get(q[i]);
+      if (!n) continue;
+      for (const s of n.inputs ?? []) {
+        if (s.link == null) continue;
+        const tl = topLinksById.get(s.link);
+        const src = tl ? resolveOrigin(tl.origin_id, tl.origin_slot) : null;
+        if (!src || src.nodeId === refId || !topById.has(src.nodeId)) continue;
+        converted.add(src.nodeId);
+        enqueue(src.nodeId);
+      }
+    }
+  }
+
+  for (const id of new Set([...converted, ...nestedRefIds])) {
     const n = topById.get(id);
     if (!n) continue;
+    // A nested ref is a shell: expand its subgraph, never emit the UUID class_type.
+    if (nestedSubgraphOf(n)) { inlineNested(id); continue; }
     const named = widgetMapOf(n);
     const inputs = {};
     for (const s of n.inputs ?? []) {
       if (s.link != null) {
-        const l = topLinksById.get(s.link);
-        if (!l) continue;
-        const src = resolveOrigin(l.origin_id, l.origin_slot);
-        if (!src) continue;
-        if (src.nodeId === refId && !feedReach.has(id)) {
-          const port = app.outputs[src.slot];
-          if (port && port.producerNodeId != null) inputs[s.name] = [String(port.producerNodeId), port.producerSlot];
-        } else if (converted.has(src.nodeId)) {
-          inputs[s.name] = [topKey(src.nodeId), src.slot];
-        } else {
-          const origin = topById.get(src.nodeId);
-          const v = origin ? literalOf(origin) : null;
-          if (v !== null && v !== undefined) inputs[s.name] = v;
-        }
+        const v = resolveTopSource(topLinksById.get(s.link), id);
+        if (v !== null && v !== undefined) inputs[s.name] = v;
       } else if (s.widget && s.name in named) {
         inputs[s.name] = asWidgetValue(named[s.name]);
       }
