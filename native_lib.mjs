@@ -257,6 +257,14 @@ export function loadNativeApp(file) {
   if (ld?.inputs?.length && refNode) {
     const shellByName = new Map((sg.inputs ?? []).map((p) => [p.name, p]));
     const used = new Set();
+    // A linearMode port's NAME is whatever the frontend renders on the canvas: the
+    // TARGET socket's `label ?? localized_name ?? socket name`. The linearData
+    // second element is only a short key ("image", "value", "aspect_ratio", …),
+    // so it is kept as an ALIAS for existing run_app callers instead of the label.
+    const displayName = (node, socketName) => {
+      const s = (node.inputs ?? []).find((i) => i.name === socketName);
+      return s ? (s.label ?? s.localized_name ?? s.name) : socketName;
+    };
     const linearInputs = [];
     for (const [rawRef, rawLabel] of ld.inputs) {
       const parts = String(rawRef).split(':');
@@ -265,13 +273,14 @@ export function loadNativeApp(file) {
       try { socket = decodeURIComponent(socket); } catch { /* keep verbatim */ }
       const n = topById.get(nodeId);
       if (!Number.isInteger(nodeId) || !socket || !n) continue;
-      let label = String(rawLabel ?? socket);
+      let label = displayName(nodeId === refNode.id ? refNode : n, socket);
       if (used.has(label)) {
         let i = 2;
         while (used.has(`${label} (${i})`)) i++;
         label = `${label} (${i})`;
       }
       used.add(label);
+      const oldLabel = rawLabel != null ? String(rawLabel) : socket;
       if (nodeId === refNode.id) {
         // A socket on the main subgraph REF node = a subgraph input port. Adopt the
         // matching shell port wholesale so its internal targets, media feed and
@@ -282,7 +291,7 @@ export function loadNativeApp(file) {
         const p = buildShellInput(sp);
         p.label = label;
         const old = sp.label ?? sp.name;
-        p.aliases = [...new Set([sp.name, old])].filter((a) => a && a !== label);
+        p.aliases = [...new Set([oldLabel, sp.name, old, socket])].filter((a) => a && a !== label);
         linearInputs.push(p);
         continue;
       }
@@ -294,6 +303,8 @@ export function loadNativeApp(file) {
         portId: `@lin:${nodeId}:${socket}`,
         portName: socket,
         label,
+        // Old linearData key and the raw socket name remain valid run_app keys.
+        aliases: [...new Set([oldLabel, socket])].filter((a) => a && a !== label),
         type: media ? (n.outputs?.[0]?.type ?? 'IMAGE') : (sock?.type ?? 'STRING'),
         targets: [],
         // Media values are filenames for the loader widget, never a socket default.
@@ -955,21 +966,27 @@ export async function appParams(ref) {
     try { specs[t] = (await getJson(`/object_info/${encodeURIComponent(t)}`))[t]?.input; } catch { specs[t] = null; }
   }));
   const socketSpec = (spec, socket) => spec?.required?.[socket] ?? spec?.optional?.[socket] ?? spec?.hidden?.[socket];
+  // object_info encodes a COMBO socket several ways:
+  //   ["opt1","opt2"]            — bare list
+  //   [["opt1","opt2"], {...}]   — options + meta dict
+  //   ["COMBO", {options:[...]}] — dict-style combo (ResolutionSelector, …)
+  const comboOptions = (raw) => {
+    if (!Array.isArray(raw)) return undefined;
+    if (Array.isArray(raw[0])) return raw[0];
+    if (raw[0] === 'COMBO' && Array.isArray(raw[1]?.options)) return raw[1].options;
+    return raw;
+  };
   const optionsOf = (port) => {
     for (const t of port.targets ?? []) {
       const type = a.nodesById.get(t.nodeId)?.type;
       const spec = type ? specs[type] : undefined;
-      // object_info wraps sockets under required/optional/hidden; the combo value is
-      // [options-array, extra-dict] — or a bare list when there is no extra dict.
-      const raw = socketSpec(spec, t.socket);
-      const opts = Array.isArray(raw?.[0]) ? raw[0] : Array.isArray(raw) ? raw : undefined;
+      const opts = comboOptions(socketSpec(spec, t.socket));
       if (Array.isArray(opts)) return opts;
     }
     if (port.linear) {
       const type = a.topById?.get(port.linear.nodeId)?.type;
       const spec = type ? specs[type] : undefined;
-      const raw = socketSpec(spec, port.linear.socket);
-      const opts = Array.isArray(raw?.[0]) ? raw[0] : Array.isArray(raw) ? raw : undefined;
+      const opts = comboOptions(socketSpec(spec, port.linear.socket));
       if (Array.isArray(opts)) return opts;
     }
     return null;

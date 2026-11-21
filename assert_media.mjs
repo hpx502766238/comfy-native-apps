@@ -14,7 +14,7 @@ const check = (label, ok, got) => {
 // reaches the (hidden) shell `控制图` media feed through the shared loader node.
 {
   const app = loadNativeApp(W + '控制生图四合一NSFW（不含提示词反推）-krea2_turbo.app.json');
-  const p = app.inputs.find((i) => i.label === 'image');
+  const p = app.inputs.find((i) => i.portName === 'image');
   check('krea2 linear image port media/feed/loader', p?.media && p.feed?.nodeId === 140 && p.loader?.nodeId === 140, p);
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'x.png' }));
   check('krea2 139.image is a link to t140', JSON.stringify(prompt['139'].inputs.image) === '["t140",0]', prompt['139']);
@@ -25,7 +25,7 @@ const check = (label, ok, got) => {
 // #62 skeleton still routes Canny #57 to the (hidden) shell feed internally.
 {
   const app = loadNativeApp(W + '控制生图-z_image_turbo_controlnet-基于Comfy官方模板自制.app.json');
-  const p = app.inputs.find((i) => i.label === 'image');
+  const p = app.inputs.find((i) => i.portName === 'image');
   check('controlnet linear image port loader is #58', p?.media && p.loader?.nodeId === 58, p);
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'y.png' }));
   check('controlnet t58.image is the supplied path', prompt.t58?.inputs?.image === 'y.png', prompt.t58);
@@ -39,7 +39,7 @@ const check = (label, ok, got) => {
 // loader (exercises the same fallback through the shared media machinery).
 {
   const app = loadNativeApp(W + '风格参考-krea2_style_ref-基于Comfy官方模板自制.app.json');
-  const p = app.inputs.find((i) => i.label === 'image');
+  const p = app.inputs.find((i) => i.portName === 'image');
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'z.png' }));
   check('styleref linear image loader is #69', p?.media && p.loader?.nodeId === 69, p);
   check('styleref image1 links to t69', JSON.stringify(prompt['52'].inputs.image1) === '["t69",0]', prompt['52']);
@@ -65,6 +65,26 @@ const check = (label, ok, got) => {
   check('krea2Angles yaw lands on the camera node', prompt.t7?.inputs?.yaw === 12.5, prompt.t7);
   check('krea2Angles distance lands on the camera node', prompt.t7?.inputs?.distance === 1.25, prompt.t7);
   check('krea2Angles seed -1 rolls a real seed', Number.isInteger(prompt.t11?.inputs?.seed) && Number(prompt.t11?.inputs?.seed) >= 0, prompt.t11);
+}
+
+// linearMode port NAMES mirror the frontend: the target socket's
+// label ?? localized_name ?? name, not the linearData short key (which stays an alias).
+{
+  const app = loadNativeApp(W + '控制生图四合一NSFW（不含提示词反推）-krea2_turbo.app.json');
+  const labels = app.inputs.map((i) => i.label);
+  const want = ['图像', '使用原图分辨率生成', '自定义分辨率宽高比', '自定义分辨率百万像素', '自定义分辨率预览', '提示词',
+    'loras.0.lora_name', 'loras.0.strength', 'loras.0.enabled', 'loras.1.lora_name', 'loras.1.strength', 'loras.1.enabled',
+    'controlnet通道选择', '控制net分辨率', 'depth强度', 'pose强度', 'candy强度', 'tile强度', 'tile预处理器', '强制启用超分后处理'];
+  check('krea2 frontend port names (exact order)', JSON.stringify(labels) === JSON.stringify(want), labels);
+  const img = app.inputs.find((i) => i.label === '图像');
+  check('krea2 Chinese label keeps old key as alias', img?.aliases?.includes('image'), img);
+  check('krea2 Chinese labels route via aliases and media override', img?.media && buildOverrides(app, { 图像: 'x.png' }).has('@media:@lin:140:image'), img);
+}
+{
+  const app = loadNativeApp(W + '摄像机视角调整-krea2Angles-来自Github.app.json');
+  const seed = app.inputs.find((i) => i.label === '种子');
+  check('krea2Angles localized label keeps old key as alias', seed?.aliases?.includes('seed'), seed);
+  check('krea2Angles alias routes to the top node', buildOverrides(app, { seed: 3 }).has('@top:11:seed'), [...buildOverrides(app, { seed: 3 }).entries()]);
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');
