@@ -215,13 +215,7 @@ export function loadNativeApp(file) {
 
   // Exposed INPUT ports. A port's link lands on an internal node's widget — that
   // (node, widget) pair is exactly where the model's value must go.
-  const inputs = (sg.inputs ?? [])
-    .filter((p) => !(p.linkIds ?? []).length || (p.linkIds ?? []).some((lid) => {
-      const l = linksById.get(lid);
-      const n = l ? nodesById.get(l.target_id) : undefined;
-      return n && !DISPLAY_NODE_TYPES.has(n.type);
-    }))
-    .map((p) => {
+  const buildShellInput = (p) => {
     const link = p.linkIds?.[0] != null ? linksById.get(p.linkIds[0]) : undefined;
     const target = link ? nodesById.get(link.target_id) : undefined;
     const socket = target?.inputs?.[link.target_slot]?.name ?? null;
@@ -244,7 +238,79 @@ export function loadNativeApp(file) {
       default: p.name in portValues ? portValues[p.name] : (socket && socket in named ? named[socket] : null),
       ...(ext ? { media: true, feed: ext.feed, chain: ext.chain, loader: ext.loader } : {}),
     };
-  });
+  };
+  const shellInputs = (sg.inputs ?? [])
+    .filter((p) => !(p.linkIds ?? []).length || (p.linkIds ?? []).some((lid) => {
+      const l = linksById.get(lid);
+      const n = l ? nodesById.get(l.target_id) : undefined;
+      return n && !DISPLAY_NODE_TYPES.has(n.type);
+    }))
+    .map(buildShellInput);
+  // The EXPOSED port surface. In a linearMode app (extra.linearData.inputs) the
+  // author hand-picks the parameters, one entry per ["<uuid>:<nodeId>:<socket>",
+  // label]. Those subgraph shell ports that are NOT picked (e.g. a nested
+  // SeedVR2's seed/sampler/scheduler/denoise/...) are exactly what the linear
+  // frontend hides — so they must not appear here either. `shellInputs` (the full
+  // derived list) is kept separately for graphToPrompt's media-link machinery.
+  let inputs = shellInputs;
+  const ld = raw.extra?.linearData;
+  if (ld?.inputs?.length && refNode) {
+    const shellByName = new Map((sg.inputs ?? []).map((p) => [p.name, p]));
+    const used = new Set();
+    const linearInputs = [];
+    for (const [rawRef, rawLabel] of ld.inputs) {
+      const parts = String(rawRef).split(':');
+      const nodeId = Number(parts[1]);
+      let socket = parts.slice(2).join(':');
+      try { socket = decodeURIComponent(socket); } catch { /* keep verbatim */ }
+      const n = topById.get(nodeId);
+      if (!Number.isInteger(nodeId) || !socket || !n) continue;
+      let label = String(rawLabel ?? socket);
+      if (used.has(label)) {
+        let i = 2;
+        while (used.has(`${label} (${i})`)) i++;
+        label = `${label} (${i})`;
+      }
+      used.add(label);
+      if (nodeId === refNode.id) {
+        // A socket on the main subgraph REF node = a subgraph input port. Adopt the
+        // matching shell port wholesale so its internal targets, media feed and
+        // default keep working (e.g. 四合一 `132:value`, `132:loras.*`, or the media
+        // `image` feed that ends at the ref's 控制图 input).
+        const sp = shellByName.get(socket);
+        if (!sp) continue;
+        const p = buildShellInput(sp);
+        p.label = label;
+        const old = sp.label ?? sp.name;
+        p.aliases = [...new Set([sp.name, old])].filter((a) => a && a !== label);
+        linearInputs.push(p);
+        continue;
+      }
+      // A socket on a PLAIN top-level node (camera/encoder/sampler/loader/...).
+      const sock = (n.inputs ?? []).find((i) => i.name === socket) ?? null;
+      const loadW = loaderWidgetOf(n);
+      const media = !!loadW;
+      const port = {
+        portId: `@lin:${nodeId}:${socket}`,
+        portName: socket,
+        label,
+        type: media ? (n.outputs?.[0]?.type ?? 'IMAGE') : (sock?.type ?? 'STRING'),
+        targets: [],
+        // Media values are filenames for the loader widget, never a socket default.
+        default: media ? undefined : (sock?.widget ? (n.widgets_values_named?.[socket] ?? null) : null),
+        // Routes run_app values to the TOP-LEVEL node's widget (`@top:<nodeId>:<socket>`).
+        linear: { nodeId, socket },
+      };
+      if (media) {
+        port.media = true;
+        port.feed = { nodeId, slot: 0 };
+        port.chain = [nodeId];
+        port.loader = { nodeId, widget: loadW };
+      }
+      linearInputs.push(port);
+    }
+    if (linearInputs.length) inputs = linearInputs;
+  }
 
   // Pre-populated overrides: each port's real value (from the ref node) applied to
   // the internal node+socket it feeds. User run_app values layer on top of these.
@@ -296,7 +362,12 @@ export function loadNativeApp(file) {
     linksById,
     topNodes,
     topLinks,
+    topById,
     inputs,
+    // Full derived input-port list (all subgraph shell ports). `inputs` may be a
+    // smaller, linearData-picked surface; graphToPrompt consults shellInputs for
+    // the media-link wiring that keeps feeds flowing even for non-exposed ports.
+    shellInputs,
     outputs,
     portValues,
     portOverrides,
@@ -375,8 +446,23 @@ export function graphToPrompt(app, overrides) {
   // as literals: their value is a filename for a loader, never an IMAGE socket.
   const eff = new Map(app.portOverrides ?? []);
   const mediaValues = new Map();
+  // Top-level widget overrides (`@top:<nodeId>:<socket>`, set by buildOverrides for
+  // linearData ports): keyed by TOP-LEVEL node id so the value lands on the widget
+  // of the emitted node (the node namespace differs from the subgraph's interior).
+  const TOP_OVERRIDE_RE = /^@top:(\d+):(.+)$/;
+  const topWidgetOverrides = new Map();
+  const topOverrideNodes = new Set();
   for (const [k, v] of overrides ?? []) {
-    if (k.startsWith(MEDIA_OVERRIDE_PREFIX)) mediaValues.set(k.slice(MEDIA_OVERRIDE_PREFIX.length), v);
+    if (k.startsWith('@top:')) {
+      const m = TOP_OVERRIDE_RE.exec(k);
+      if (m) {
+        const nid = Number(m[1]);
+        let map = topWidgetOverrides.get(nid);
+        if (!map) topWidgetOverrides.set(nid, (map = new Map()));
+        map.set(m[2], v);
+        topOverrideNodes.add(nid);
+      }
+    } else if (k.startsWith(MEDIA_OVERRIDE_PREFIX)) mediaValues.set(k.slice(MEDIA_OVERRIDE_PREFIX.length), v);
     else eff.set(k, v);
   }
   // Top-level node ids live in a different namespace than the subgraph's internal
@@ -387,11 +473,23 @@ export function graphToPrompt(app, overrides) {
   // LoadImage); a supplied filename goes on the loader's widget. Ports fed from
   // outside keep working with their saved image even when no value is supplied.
   const mediaLinks = new Map();
-  const topWidgetOverrides = new Map();
   const feedReach = new Set();
   const syntheticLoads = [];
   let synthLoadId = 999100;
-  for (const p of app.inputs) {
+  // Iterate both the exposed input ports AND the full shell list: a linearData
+  // media port (e.g. 四合一 `140:image`) carries the filename for the same loader
+  // node that the hidden shell port (e.g. `控制图`) routes to its internal
+  // consumers. Skipping either side would orphan the feed or the consumer link.
+  const mediaPorts = [];
+  {
+    const seen = new Set();
+    for (const p of [...(app.shellInputs ?? []), ...app.inputs]) {
+      if (!p.media || seen.has(p.portId)) continue;
+      seen.add(p.portId);
+      mediaPorts.push(p);
+    }
+  }
+  for (const p of mediaPorts) {
     if (!p.media) continue;
     const value = mediaValues.get(p.portId);
     let target = p.feed;
@@ -505,8 +603,8 @@ export function graphToPrompt(app, overrides) {
   const perPortReach = app.outputs.map((_, i) => reachFromSlot(i));
   const allReach = new Set();
   for (const r of perPortReach) for (const id of r) allReach.add(id);
-  // Downstream saver chain + upstream media-feed chain (LoadImage -> preprocessor).
-  const converted = new Set([...allReach, ...feedReach]);
+  // Downstream saver chain + upstream media-feed chain + overridden top widgets.
+  const converted = new Set([...allReach, ...feedReach, ...topOverrideNodes]);
 
   // Literal value of a helper node that stayed outside the converted set
   // (e.g. PrimitiveFloat -> VHS_VideoCombine.frame_rate). Only primitive-style
@@ -746,13 +844,18 @@ export function coerceByType(value, type) {
 // label ("prompt") or the exact "<nodeId>.<widget>" form. seed = -1 rolls random.
 export function buildOverrides(app, values) {
   const ov = new Map();
-  const byLabel = new Map(app.inputs.map((i) => [String(i.label), i]));
+  const byLabel = new Map();
+  for (const i of app.inputs) {
+    if (!byLabel.has(String(i.label))) byLabel.set(String(i.label), i);
+    for (const a of i.aliases ?? []) if (!byLabel.has(String(a))) byLabel.set(String(a), i);
+  }
   for (const [rawKey, rawVal] of Object.entries(values ?? {})) {
     const key = String(rawKey).trim();
     const m = /^(\d+):(.+)$/.exec(key) || /^(\d+)\.(.+)$/.exec(key);
     let port, targets, type;
     if (m) {
-      port = app.inputs.find((i) => (i.targets ?? []).some((t) => String(t.nodeId) === m[1] && t.socket === m[2]));
+      port = app.inputs.find((i) => (i.targets ?? []).some((t) => String(t.nodeId) === m[1] && t.socket === m[2]))
+        || app.inputs.find((i) => i.linear && String(i.linear.nodeId) === m[1] && i.linear.socket === m[2]);
       targets = port?.targets ?? [{ nodeId: m[1], socket: m[2] }];
       type = port?.type;
     } else {
@@ -765,6 +868,14 @@ export function buildOverrides(app, values) {
       // A media value is a filename for the port's loader, not a literal for the
       // IMAGE socket the port feeds. graphToPrompt routes it to the loader widget.
       ov.set(MEDIA_OVERRIDE_PREFIX + port.portId, String(rawVal));
+      continue;
+    }
+    if (port?.linear) {
+      // linearData port: the value goes to a TOP-LEVEL node's widget, which the
+      // subgraph's own node-id namespace can't express (`@top:<nodeId>:<socket>`).
+      let v = rawVal;
+      if (/^seed$/i.test(port.linear.socket) && Number(v) === -1) v = Math.floor(Math.random() * 0xffffffff);
+      ov.set(`@top:${port.linear.nodeId}:${port.linear.socket}`, coerceByType(v, type));
       continue;
     }
     if (!targets.length) throw new Error(`param "${key}" has no internal target`);
@@ -825,24 +936,39 @@ export function appCatalog() {
 export async function appParams(ref) {
   const app = resolveAppRef(ref);
   const a = loadNativeApp(app.file);
-  // The node types behind this app's COMBO ports, deduped.
+  // The node types behind this app's COMBO ports, deduped. linearData ports target
+  // TOP-LEVEL nodes, so combine the subgraph-internal targets with the linear node.
   const comboPorts = a.inputs.filter((p) => p.type === 'COMBO');
   const nodeTypes = new Set();
-  for (const p of comboPorts) for (const t of p.targets ?? []) {
-    const type = a.nodesById.get(t.nodeId)?.type;
-    if (type) nodeTypes.add(type);
+  for (const p of comboPorts) {
+    for (const t of p.targets ?? []) {
+      const type = a.nodesById.get(t.nodeId)?.type;
+      if (type) nodeTypes.add(type);
+    }
+    if (p.linear) {
+      const type = a.topById?.get(p.linear.nodeId)?.type;
+      if (type) nodeTypes.add(type);
+    }
   }
   const specs = {};
   await Promise.all([...nodeTypes].map(async (t) => {
     try { specs[t] = (await getJson(`/object_info/${encodeURIComponent(t)}`))[t]?.input; } catch { specs[t] = null; }
   }));
+  const socketSpec = (spec, socket) => spec?.required?.[socket] ?? spec?.optional?.[socket] ?? spec?.hidden?.[socket];
   const optionsOf = (port) => {
     for (const t of port.targets ?? []) {
       const type = a.nodesById.get(t.nodeId)?.type;
       const spec = type ? specs[type] : undefined;
       // object_info wraps sockets under required/optional/hidden; the combo value is
       // [options-array, extra-dict] — or a bare list when there is no extra dict.
-      const raw = spec?.required?.[t.socket] ?? spec?.optional?.[t.socket] ?? spec?.hidden?.[t.socket];
+      const raw = socketSpec(spec, t.socket);
+      const opts = Array.isArray(raw?.[0]) ? raw[0] : Array.isArray(raw) ? raw : undefined;
+      if (Array.isArray(opts)) return opts;
+    }
+    if (port.linear) {
+      const type = a.topById?.get(port.linear.nodeId)?.type;
+      const spec = type ? specs[type] : undefined;
+      const raw = socketSpec(spec, port.linear.socket);
       const opts = Array.isArray(raw?.[0]) ? raw[0] : Array.isArray(raw) ? raw : undefined;
       if (Array.isArray(opts)) return opts;
     }
