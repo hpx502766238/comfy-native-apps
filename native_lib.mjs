@@ -1167,7 +1167,7 @@ export async function downloadOutput({ prompt_id, index = 0, dest }) {
 // Only ComfyUI-side metadata (filename/subfolder/type + /view URL) is reported;
 // server filesystem paths are deliberately omitted — a client that wants a local
 // file calls download_output, which returns saved_to on the MCP host.
-export async function collectOutputs(entry) {
+export async function collectOutputs(entry, { index = 0 } = {}) {
   const texts = [];
   for (const [nodeId, nodeOut] of Object.entries(entry.outputs ?? {})) {
     for (const [key, items] of Object.entries(nodeOut)) {
@@ -1184,7 +1184,9 @@ export async function collectOutputs(entry) {
     }
   }
   cands.sort((a, b) => Number(a.it.type === 'temp') - Number(b.it.type === 'temp'));
-  for (const { key, it } of cands) {
+  const pick = cands[Math.max(0, Number(index) || 0)];
+  if (pick) {
+    const { key, it } = pick;
     const meta = { filename: it.filename, subfolder: it.subfolder ?? '', type: it.type ?? 'output', url: outputViewUrl(it) };
     if (key === 'videos' || /\.(mp4|webm|mov|mkv|gif)$/i.test(it.filename)) {
       return { kind: 'video', ...meta, extra: texts };
@@ -1194,6 +1196,18 @@ export async function collectOutputs(entry) {
     return { kind: 'image', ...meta, mime, b64: data.toString('base64'), extra: texts };
   }
   return { kind: 'none', text: 'job finished but no image/video output was found', extra: texts };
+}
+
+// Preview a finished job WITHOUT writing anything to disk: re-read its /history
+// entry and return the index-th image inline (base64) plus its /view URL. This is
+// what makes the submit-only run_app flow viewable: the client calls
+// job_status(prompt_id, wait_s) and gets the picture, no download_output needed.
+export async function jobPreview(promptId, { index = 0 } = {}) {
+  const hist = await getJson(`/history/${encodeURIComponent(promptId)}`).catch(() => ({}));
+  const entry = hist[promptId];
+  if (!entry || entry.status?.status_str === 'error') return null;
+  const out = await collectOutputs(entry, { index });
+  return out.kind === 'image' ? out : null;
 }
 
 // --------------------------------------------------------------------------- #
@@ -1281,7 +1295,7 @@ async function inspectJob(promptId) {
     return { prompt_id: id, state: 'error', error, entry: e };
   }
   const outs = Object.entries(e.outputs ?? {})
-    .flatMap(([, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ key: k, filename: x.filename, ...(x.subfolder ? { subfolder: x.subfolder } : {}), type: x.type ?? 'output' }))));
+    .flatMap(([, o]) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).filter((x) => x && typeof x === 'object' && x.filename).map((x) => ({ key: k, filename: x.filename, ...(x.subfolder ? { subfolder: x.subfolder } : {}), type: x.type ?? 'output', url: outputViewUrl(x) }))));
   return { prompt_id: id, state: 'completed', outputs: outs, entry: e };
 }
 

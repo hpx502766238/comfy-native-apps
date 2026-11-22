@@ -23,7 +23,9 @@
 //   download_output(prompt_id, index?, dest?) -> download one finished output to a
 //                                     local file (file or dir dest); works remote too
 //   queue_status(recent?)         -> what is running + pending, plus recent finished jobs
-//   job_status(prompt_id, wait_s?) -> state + output files of one job; wait_s blocks
+//   job_status(prompt_id, wait_s?, preview?, index?) -> state + output files of one
+//                                     job; wait_s blocks, and a completed job returns
+//                                     its view URL plus the image inline (no download)
 //   clear_queue()                  -> clear the pending queue
 //   interrupt()                    -> stop the current generation
 //
@@ -40,7 +42,7 @@
 import {
   BASE, RUN_TIMEOUT_S, appCatalog, appParams, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,
-  getQueue, jobStatus, postJson, uploadFile, downloadOutput,
+  getQueue, jobStatus, jobPreview, postJson, uploadFile, downloadOutput,
 } from './native_lib.mjs';
 
 const PROTOCOL_VERSION = '2024-11-05';
@@ -121,12 +123,16 @@ const TOOLS = [
     name: 'job_status',
     description: 'Report the state (running / pending / completed / error) and output files of one job. ' +
       'Pass the UUID prompt_id returned by run_app. While a job is still queued, its queue number also works. ' +
-      'Set wait_s to block until the job finishes (or the budget runs out) instead of polling.',
+      'Set wait_s to block until the job finishes (or the budget runs out) instead of polling. ' +
+      'When the job is completed, each output carries a viewable "url", and (preview=true, the default) the ' +
+      'first image is returned inline so a submit-only run_app can be previewed without download_output.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt_id: { type: 'string', description: 'The prompt_id returned by run_app or seen in queue_status.' },
         wait_s: { type: 'integer', minimum: 0, maximum: 3600, description: 'Block until the job finishes, up to this many seconds. Defaults to 0 (return at once).' },
+        preview: { type: 'boolean', description: 'When the job is completed, return the image inline (base64) for immediate viewing. Defaults to true; set false to get only the JSON status/URLs.' },
+        index: { type: 'integer', minimum: 0, description: 'Which output to preview when the job wrote several. Defaults to 0.' },
       },
       required: ['prompt_id'],
     },
@@ -222,7 +228,7 @@ async function runAppHandler({ app, wait_s, inputs, ...stray }) {
       type: 'text',
       text: JSON.stringify({
         ...st,
-        hint: 'Job submitted. Call job_status with this prompt_id and wait_s to block for the result.',
+        hint: 'Job submitted. Call job_status with this prompt_id and wait_s to block; once completed it returns the image inline plus a view URL, so no download is needed.',
       }, null, 2),
     }];
   }
@@ -239,7 +245,7 @@ async function runAppHandler({ app, wait_s, inputs, ...stray }) {
         ...st,
         timed_out: true,
         waited_s: waitS,
-        hint: 'Still not finished. Call job_status with this prompt_id and wait_s to keep waiting, then download_output.',
+        hint: 'Still not finished. Call job_status with this prompt_id and wait_s to keep waiting; it returns the image inline once completed (download_output only if you need a local file).',
       }, null, 2),
     }];
   }
@@ -295,7 +301,16 @@ function handle(msg) {
         }
         case 'job_status': {
           const waitS = Math.min(Math.max(Number(args.wait_s ?? 0) || 0, 0), 3600);
-          return [{ type: 'text', text: JSON.stringify(await jobStatus(args.prompt_id, { waitS }), null, 2) }];
+          const st = await jobStatus(args.prompt_id, { waitS });
+          const content = [{ type: 'text', text: JSON.stringify(st, null, 2) }];
+          // Completed + preview (default on): attach the image inline so a
+          // submit-only run_app can be viewed without download_output.
+          if (st.state === 'completed' && args.preview !== false) {
+            const index = Math.max(0, Number(args.index ?? 0) || 0);
+            const out = await jobPreview(st.prompt_id, { index }).catch(() => null);
+            if (out?.kind === 'image') content.push({ type: 'image', data: out.b64, mimeType: out.mime });
+          }
+          return content;
         }
         case 'clear_queue': { const r = await postJson('/queue', { clear: true }); return [{ type: 'text', text: JSON.stringify(r) }]; }
         case 'interrupt': { const r = await postJson('/interrupt', {}); return [{ type: 'text', text: JSON.stringify(r) }]; }
