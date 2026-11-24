@@ -13,6 +13,10 @@ const appFile = (needle, avoid) => {
   const hits = APPS.filter((a) => a.id.includes(needle) && (!avoid || !a.id.includes(avoid)));
   return hits.length ? hits[0].file : null;
 };
+// Two sibling apps share this id prefix: the plain 四合一 (whose 20-port surface
+// this suite asserts) and the -含LLMAPI提示词反推 variant (different ports: 可选创意,
+// 控制预处理net分辨率, no 强制启用超分后处理). Skip the LLMAPI one so the fixture is
+// unambiguous — this is test-only disambiguation; runtime supports both equally.
 const fourInOne = () => appFile('控制生图四合一-krea2_turbo', 'LLMAPI');
 const krea2Angles = () => appFile('krea2Angles');
 const controlnet = () => appFile('控制生图-z_image_turbo_controlnet');
