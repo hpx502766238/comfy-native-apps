@@ -2,122 +2,177 @@
 // No ComfyUI needed: pure loadNativeApp → buildOverrides → graphToPrompt checks.
 // Run: node assert_media.mjs
 //
-// These checks use a few REAL apps as fixtures. If one is renamed or removed, its
-// block is SKIPPED (not failed): the MCP itself is generic and discovers every
-// *.app.json at runtime — only this dev suite needs concrete sample files.
+// Everything here is SYNTHETIC: a minimal .app.json fixture is generated in a temp
+// dir, so the suite is self-contained and names no real workflow. A final generic
+// pass scans whatever apps are actually installed and asserts shared invariants.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { loadNativeApp, buildOverrides, graphToPrompt, listApps } from './native_lib.mjs';
 
-// Resolve fixtures by id substring, so renaming an app file does not break this.
-const APPS = listApps().apps.filter((a) => !a.error);
-const appFile = (needle, avoid) => {
-  const hits = APPS.filter((a) => a.id.includes(needle) && (!avoid || !a.id.includes(avoid)));
-  return hits.length ? hits[0].file : null;
-};
-// Two sibling apps share this id prefix: the plain 四合一 (whose 20-port surface
-// this suite asserts) and the -含LLMAPI提示词反推 variant (different ports: 可选创意,
-// 控制预处理net分辨率, no 强制启用超分后处理). Skip the LLMAPI one so the fixture is
-// unambiguous — this is test-only disambiguation; runtime supports both equally.
-const fourInOne = () => appFile('控制生图四合一-krea2_turbo', 'LLMAPI');
-const krea2Angles = () => appFile('krea2Angles');
-const controlnet = () => appFile('控制生图-z_image_turbo_controlnet');
-const styleRef = () => appFile('风格参考-krea2_style_ref');
+const SG_ID = 'sg-synthetic';
+
+// A minimal native app: one subgraph input IMAGE fed by a top-level LoadImage,
+// plus STRING and INT ports, an internal CLIPTextEncode/KSampler, a top-level
+// SaveImage, and a frontend-only Note that must never be emitted.
+function syntheticApp() {
+  return {
+    nodes: [
+      {
+        id: 1, type: SG_ID, pos: [0, 0], size: [200, 100], flags: {}, order: 0, mode: 0,
+        inputs: [
+          { name: 'image', type: 'IMAGE', link: 201, localized_name: 'Source Image' },
+          { name: 'prompt', type: 'STRING', link: null, widget: { name: 'prompt' }, label: 'Prompt Text' },
+          { name: 'seed', type: 'INT', link: null, widget: { name: 'seed' } },
+        ],
+        outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [202] }],
+        widgets_values: ['', 0],
+        widgets_values_named: { prompt: '', seed: 0 },
+      },
+      {
+        id: 2, type: 'LoadImage', pos: [0, 0], size: [100, 100], flags: {}, order: 1, mode: 0,
+        inputs: [{ name: 'image', type: 'IMAGE', localized_name: 'Source Image', widget: { name: 'image' } }],
+        outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [201] }],
+        widgets_values: ['default.png'],
+        widgets_values_named: { image: 'default.png' },
+      },
+      {
+        id: 3, type: 'SaveImage', pos: [0, 0], size: [100, 100], flags: {}, order: 2, mode: 0,
+        inputs: [{ name: 'images', type: 'IMAGE', link: 202 }],
+        outputs: [],
+        widgets_values: ['synthetic'],
+        widgets_values_named: { filename_prefix: 'synthetic' },
+      },
+    ],
+    links: [
+      [201, 2, 0, 1, 0, 'IMAGE'],
+      [202, 1, 0, 3, 0, 'IMAGE'],
+    ],
+    definitions: {
+      subgraphs: [{
+        id: SG_ID,
+        name: 'Synthetic App',
+        inputNode: { id: -10 },
+        outputNode: { id: -20 },
+        inputs: [
+          { id: 'p-image', name: 'image', type: 'IMAGE', linkIds: [101] },
+          { id: 'p-prompt', name: 'prompt', type: 'STRING', label: 'Prompt Text', linkIds: [102] },
+          { id: 'p-seed', name: 'seed', type: 'INT', linkIds: [104] },
+        ],
+        outputs: [{ id: 'o-image', name: 'IMAGE', type: 'IMAGE', linkIds: [103] }],
+        nodes: [
+          { id: 10, type: 'CLIPTextEncode', mode: 0,
+            inputs: [{ name: 'text', type: 'STRING', widget: { name: 'text' }, link: 102 }],
+            outputs: [{ name: 'CONDITIONING', type: 'CONDITIONING', links: [105] }],
+            widgets_values_named: { text: '' } },
+          { id: 11, type: 'ImageScale', mode: 0,
+            inputs: [{ name: 'image', type: 'IMAGE', link: 101 }],
+            outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [103] }],
+            widgets_values_named: {} },
+          { id: 12, type: 'KSampler', mode: 0,
+            inputs: [
+              { name: 'model', type: 'MODEL', link: null },
+              { name: 'positive', type: 'CONDITIONING', link: 105 },
+              { name: 'negative', type: 'CONDITIONING', link: null },
+              { name: 'latent_image', type: 'LATENT', link: null },
+              { name: 'seed', type: 'INT', widget: { name: 'seed' }, link: 104 },
+            ],
+            outputs: [{ name: 'LATENT', type: 'LATENT', links: [] }],
+            widgets_values_named: { seed: 0 } },
+          { id: 150, type: 'Note', mode: 0, inputs: [], outputs: [], widgets_values_named: {} },
+        ],
+        links: [
+          { id: 101, origin_id: -10, origin_slot: 0, target_id: 11, target_slot: 0, type: 'IMAGE' },
+          { id: 102, origin_id: -10, origin_slot: 1, target_id: 10, target_slot: 0, type: 'STRING' },
+          { id: 103, origin_id: 11, origin_slot: 0, target_id: -20, target_slot: 0, type: 'IMAGE' },
+          { id: 104, origin_id: -10, origin_slot: 2, target_id: 12, target_slot: 4, type: 'INT' },
+          { id: 105, origin_id: 10, origin_slot: 0, target_id: 12, target_slot: 1, type: 'CONDITIONING' },
+        ],
+      }],
+    },
+    extra: {
+      linearData: {
+        inputs: [
+          [`${SG_ID}:2:image`, 'image'],
+          [`${SG_ID}:1:prompt`, 'prompt'],
+          [`${SG_ID}:1:seed`, 'seed'],
+        ],
+      },
+    },
+  };
+}
 
 let failed = 0;
 const check = (label, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}${ok ? '' : ' -> ' + JSON.stringify(got)}`);
   if (!ok) failed++;
 };
-// Run a fixture block, or skip it when the sample app is absent.
-const withFixture = (file, label, fn) => {
-  if (!file) { console.log(`SKIP ${label} (fixture not found)`); return; }
-  fn(loadNativeApp(file));
-};
 
-// 四合一: the linearData `image` port is the top-level LoadImage #140; its value
-// reaches the (hidden) shell `控制图` media feed through the shared loader node.
-withFixture(fourInOne(), 'krea2 linear media', (app) => {
-  const p = app.inputs.find((i) => i.portName === 'image');
-  check('krea2 linear image port media/feed/loader', p?.media && p.feed?.nodeId === 140 && p.loader?.nodeId === 140, p);
-  const prompt = graphToPrompt(app, buildOverrides(app, { image: 'x.png' }));
-  check('krea2 139.image is a link to t140', JSON.stringify(prompt['139'].inputs.image) === '["t140",0]', prompt['139']);
-  check('krea2 t140.image is the supplied path', prompt.t140?.inputs?.image === 'x.png', prompt.t140);
-});
-
-// controlnet: the linear `image` port targets LoadImage #58 directly; the bypassed
-// #62 skeleton still routes Canny #57 to the (hidden) shell feed internally.
-withFixture(controlnet(), 'controlnet linear media', (app) => {
-  const p = app.inputs.find((i) => i.portName === 'image');
-  check('controlnet linear image port loader is #58', p?.media && p.loader?.nodeId === 58, p);
-  const prompt = graphToPrompt(app, buildOverrides(app, { image: 'y.png' }));
-  check('controlnet t58.image is the supplied path', prompt.t58?.inputs?.image === 'y.png', prompt.t58);
-  check('controlnet Canny gets LoadImage', JSON.stringify(prompt.t57?.inputs?.image) === '["t58",0]', prompt.t57);
-  check('controlnet internal consumer links to Canny', JSON.stringify(prompt['60'].inputs.image) === '["t57",0]', prompt['60']);
-  check('controlnet bypassed #62 absent', !('t62' in prompt), Object.keys(prompt));
-});
-
-// style ref: linear `image` port drives LoadImage #69; hidden image2/image3 have
-// no loader. A value routed to a no-loader media port still spawns a synthetic
-// loader (exercises the same fallback through the shared media machinery).
-withFixture(styleRef(), 'style-ref linear media', (app) => {
-  const p = app.inputs.find((i) => i.portName === 'image');
-  const prompt = graphToPrompt(app, buildOverrides(app, { image: 'z.png' }));
-  check('styleref linear image loader is #69', p?.media && p.loader?.nodeId === 69, p);
-  check('styleref image1 links to t69', JSON.stringify(prompt['52'].inputs.image1) === '["t69",0]', prompt['52']);
-  check('styleref image2/image3 stay null', prompt['52'].inputs.image2 === null && prompt['52'].inputs.image3 === null, prompt['52']);
-  const img2 = app.shellInputs.find((s) => s.portName === 'image2');
-  const prompt2 = graphToPrompt(app, new Map([['@media:' + img2.portId, 'z2.png']]));
-  const syn = Object.keys(prompt2).find((k) => /^\d+$/.test(k) && prompt2[k].class_type === 'LoadImage');
-  check('styleref synthetic loader holds z2.png', syn != null && prompt2[syn].inputs.image === 'z2.png', prompt2);
-  check('styleref image2 links to synthetic loader', JSON.stringify(prompt2['52'].inputs.image2) === `["${syn}",0]`, prompt2['52']);
-});
-
-// scalar ports keep their literal override behaviour.
-withFixture(fourInOne(), 'krea2 scalar override', (app) => {
-  const prompt = graphToPrompt(app, buildOverrides(app, { prompt: 'a cat' }));
-  check('scalar string override still literal (alias "prompt")', Object.values(prompt).some((n) => n.class_type === 'CLIPTextEncode' && n.inputs.text === 'a cat'));
-});
-
-// linearData top-level ports route to their top-level node's widget.
-withFixture(krea2Angles(), 'krea2Angles top-level routing', (app) => {
-  const prompt = graphToPrompt(app, buildOverrides(app, { yaw: 12.5, distance: 1.25, seed: -1 }));
-  check('krea2Angles yaw lands on the camera node', prompt.t7?.inputs?.yaw === 12.5, prompt.t7);
-  check('krea2Angles distance lands on the camera node', prompt.t7?.inputs?.distance === 1.25, prompt.t7);
-  check('krea2Angles seed -1 rolls a real seed', Number.isInteger(prompt.t11?.inputs?.seed) && Number(prompt.t11?.inputs?.seed) >= 0, prompt.t11);
-});
-
-// linearMode port NAMES mirror the frontend: the target socket's
-// label ?? localized_name ?? name, not the linearData short key (which stays an alias).
-withFixture(fourInOne(), 'krea2 frontend port names', (app) => {
-  const labels = app.inputs.map((i) => i.label);
-  const want = ['图像', '使用原图分辨率生成', '自定义分辨率宽高比', '自定义分辨率百万像素', '自定义分辨率预览', '提示词',
-    'loras.0.lora_name', 'loras.0.strength', 'loras.0.enabled', 'loras.1.lora_name', 'loras.1.strength', 'loras.1.enabled',
-    'controlnet通道选择', '控制net分辨率', 'depth强度', 'pose强度', 'candy强度', 'tile强度', 'tile预处理器', '强制启用超分后处理'];
-  check('krea2 frontend port names (exact order)', JSON.stringify(labels) === JSON.stringify(want), labels);
-  const img = app.inputs.find((i) => i.label === '图像');
-  check('krea2 Chinese label keeps old key as alias', img?.aliases?.includes('image'), img);
-  check('krea2 Chinese labels route via aliases and media override', img?.media && buildOverrides(app, { 图像: 'x.png' }).has('@media:@lin:140:image'), img);
-});
-
-withFixture(krea2Angles(), 'krea2Angles localized labels', (app) => {
-  const seed = app.inputs.find((i) => i.label === '种子');
-  check('krea2Angles localized label keeps old key as alias', seed?.aliases?.includes('seed'), seed);
-  check('krea2Angles alias routes to the top node', buildOverrides(app, { seed: 3 }).has('@top:11:seed'), [...buildOverrides(app, { seed: 3 }).entries()]);
-});
-
-// GENERIC check (no fixture): frontend-only nodes (Note / MarkdownNote / Reroute /
-// PrimitiveNode) must never reach the API prompt — ComfyUI rejects the whole job
-// with missing_node_type. This scans EVERY app currently on disk, including new ones.
+// --------------------------------------------------------------------------- #
+// Synthetic fixture: linearMode labels, aliases, media routing, top widgets.
+// --------------------------------------------------------------------------- #
 {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-app-fixture-'));
+  const file = path.join(dir, 'synthetic.app.json');
+  fs.writeFileSync(file, JSON.stringify(syntheticApp()));
+  const app = loadNativeApp(file);
+
+  const labels = app.inputs.map((i) => i.label);
+  check('linearMode labels use the target socket name chain',
+    JSON.stringify(labels) === JSON.stringify(['Source Image', 'Prompt Text', 'seed']), labels);
+
+  const img = app.inputs.find((i) => i.label === 'Source Image');
+  check('image port keeps the linearData key as an alias', img?.aliases?.includes('image'), img);
+  check('image port routes to its top-level loader', img?.media && img.feed?.nodeId === 2 && img.loader?.nodeId === 2, img);
+
+  const prompt = app.inputs.find((i) => i.label === 'Prompt Text');
+  check('ref-adopted port keeps the old key as an alias', prompt?.aliases?.includes('prompt'), prompt);
+
+  // Media value lands on the loader widget; the internal consumer links to it.
+  const media = graphToPrompt(app, buildOverrides(app, { 'Source Image': 'x.png' }));
+  check('internal consumer links to the top-level loader', JSON.stringify(media['11'].inputs.image) === '["t2",0]', media['11']);
+  check('loader widget gets the supplied filename', media.t2?.inputs?.image === 'x.png', media.t2);
+  check('top-level saver is kept (no synthetic saver added)', media.t3?.class_type === 'SaveImage', Object.keys(media));
+
+  // Scalar overrides: alias key and localized label both resolve.
+  const scalar = graphToPrompt(app, buildOverrides(app, { prompt: 'hello' }));
+  check('alias key overrides the internal text widget', scalar['10'].inputs.text === 'hello', scalar['10']);
+  const seed = graphToPrompt(app, buildOverrides(app, { seed: 3 }));
+  check('ref-adopted scalar overrides its internal target', seed['12'].inputs.seed === 3, seed['12']);
+  const rolled = graphToPrompt(app, buildOverrides(app, { seed: -1 }));
+  check('seed -1 rolls a real seed', Number.isInteger(rolled['12'].inputs.seed) && rolled['12'].inputs.seed >= 0, rolled['12']);
+
+  // Frontend-only node must never reach the API prompt.
+  check('frontend-only Note is not emitted', !('150' in media) && !Object.values(media).some((n) => n.class_type === 'Note'), Object.keys(media));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// --------------------------------------------------------------------------- #
+// Generic invariants over EVERY installed app (no fixture names/ids).
+// --------------------------------------------------------------------------- #
+{
+  const apps = listApps().apps.filter((a) => !a.error);
   const FE = /^(Note|MarkdownNote|Reroute|PrimitiveNode)$/;
-  const offenders = [];
-  for (const a of APPS) {
+  const problems = [];
+  for (const a of apps) {
     const app = loadNativeApp(a.file);
     const prompt = graphToPrompt(app, buildOverrides(app, {}));
+
+    const labels = app.inputs.map((i) => i.label);
+    if (labels.some((l) => !l)) problems.push(`${a.number}: empty input label`);
+    if (new Set(labels).size !== labels.length) problems.push(`${a.number}: duplicate input labels`);
+
     for (const [id, n] of Object.entries(prompt)) {
-      if (FE.test(String(n.class_type))) offenders.push(`${a.id}#${id}:${n.class_type}`);
+      if (FE.test(String(n.class_type))) problems.push(`${a.number}#${id}: frontend-only ${n.class_type}`);
+      if (!n.class_type || typeof n.inputs !== 'object') problems.push(`${a.number}#${id}: malformed node`);
+    }
+
+    for (const p of app.inputs) {
+      if (p.media && !p.loader && !p.feed) problems.push(`${a.number}: media port "${p.label}" has no loader/feed`);
     }
   }
-  check('no frontend-only node reaches the API prompt (all apps)', offenders.length === 0, offenders);
+  check(`all installed apps convert cleanly (${apps.length} checked)`, problems.length === 0, problems);
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');

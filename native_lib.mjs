@@ -49,9 +49,9 @@ export const RUN_TIMEOUT_S = Number(process.env.RUN_TIMEOUT_S ?? 300);
 // Workflows-root resolution. Native apps live under <comfyui user>/<user>/workflows/…
 // --------------------------------------------------------------------------- #
 const ROOT_CANDIDATES = [
-  'E:/AIGenerationStudio/ComfyUI/ComfyUI/user',
   path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'ComfyUI', 'resources', 'ComfyUI', 'user'),
   path.join(os.homedir(), 'Documents', 'ComfyUI', 'user'),
+  path.join(os.homedir(), 'ComfyUI', 'user'),
 ];
 export function resolveWorkflowsRoot() {
   if (process.env.WORKFLOWS_ROOT) return process.env.WORKFLOWS_ROOT;
@@ -291,8 +291,8 @@ export function loadNativeApp(file) {
       if (nodeId === refNode.id) {
         // A socket on the main subgraph REF node = a subgraph input port. Adopt the
         // matching shell port wholesale so its internal targets, media feed and
-        // default keep working (e.g. 四合一 `132:value`, `132:loras.*`, or the media
-        // `image` feed that ends at the ref's 控制图 input).
+        // default keep working (e.g. a ref-node scalar port, a `loras.*` port, or the
+        // media feed that ends at the ref's image input).
         const sp = shellByName.get(socket);
         if (!sp) continue;
         const p = buildShellInput(sp);
@@ -495,9 +495,9 @@ export function graphToPrompt(app, overrides) {
   const syntheticLoads = [];
   let synthLoadId = 999100;
   // Iterate both the exposed input ports AND the full shell list: a linearData
-  // media port (e.g. 四合一 `140:image`) carries the filename for the same loader
-  // node that the hidden shell port (e.g. `控制图`) routes to its internal
-  // consumers. Skipping either side would orphan the feed or the consumer link.
+  // media port (e.g. a loader's `image`) carries the filename for the same loader
+  // node that the hidden shell port (e.g. a control-image input) routes to its
+  // internal consumers. Skipping either side would orphan the feed or the consumer link.
   const mediaPorts = [];
   {
     const seen = new Set();

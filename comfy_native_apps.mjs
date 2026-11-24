@@ -37,8 +37,9 @@
 //
 // Client config (Claude Code / any MCP client):
 //   { "command": "node",
-//     "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
-//     "env": { "COMFYUI_URL": "http://127.0.0.1:8188" } }
+//     "args": ["<path-to>/comfy-native-apps/comfy_native_apps.mjs"],
+//     "env": { "COMFYUI_URL": "http://127.0.0.1:8188",
+//              "WORKFLOWS_ROOT": "<ComfyUI user dir>" } }
 import {
   BASE, RUN_TIMEOUT_S, appCatalog, appParams, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,

@@ -4,7 +4,7 @@
 `node <本仓库的 comfy_native_apps.mjs>` 拉起。核心只有一条命令:
 
 ```bash
-node E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs
+node C:/path/to/comfy-native-apps/comfy_native_apps.mjs
 ```
 
 配置时把它拆成 `command`(`node`) + `args`(上面的 `.mjs` 路径) + `env`
@@ -32,7 +32,7 @@ node E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs
 
 ## 1) Claude Code
 
-**项目级**:`E:\AIGenerationStudio\.mcp.json`(仅在该项目生效;不加到
+**项目级**:`C:\path\to\project\.mcp.json`(仅在该项目生效;不加到
 `~/.claude.json`,会变成全局)。
 
 ```json
@@ -40,7 +40,7 @@ node E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs
   "mcpServers": {
     "comfy-native-apps": {
       "command": "node",
-      "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
+      "args": ["C:/path/to/comfy-native-apps/comfy_native_apps.mjs"],
       "env": { "COMFYUI_URL": "http://127.0.0.1:8188" }
     }
   }
@@ -73,7 +73,7 @@ dsh 的 MCP 配置存在 `C:\Users\<you>\.dsh\storages\mcp_connector.json`,
         {
           "serverKey": "main",
           "command": "node",
-          "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
+          "args": ["C:/path/to/comfy-native-apps/comfy_native_apps.mjs"],
           "env": { "COMFYUI_URL": "http://127.0.0.1:8188" },
           "cwd": "",
           "transport": "stdio",
@@ -99,7 +99,7 @@ opencode 的 MCP 在项目根 `opencode.json` 的 `mcp` 字段:
   "mcp": {
     "comfy-native-apps": {
       "type": "local",
-      "command": ["node", "E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
+      "command": ["node", "C:/path/to/comfy-native-apps/comfy_native_apps.mjs"],
       "environment": { "COMFYUI_URL": "http://127.0.0.1:8188" }
     }
   }
@@ -133,5 +133,5 @@ stdio,不支持 HTTP(sse/streamable)。如确有需要可提 issue。
 
 > 旧写法 `COMFYUI_HOST` + `COMFYUI_PORT` 仍兼容，但推荐统一用 `COMFYUI_URL`。
 
-*路径说明:* 本文件例子用 `E:/AIGenerationStudio/tools/comfy-native-apps`
+*路径说明:* 本文件例子用 `C:/path/to/comfy-native-apps`
 (即本仓库本地位置)。clone 到别处请全局替换。

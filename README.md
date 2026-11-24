@@ -105,7 +105,7 @@ API is touched. The `.app.json` files are read straight off disk.
 ```json
 {
   "command": "node",
-  "args": ["E:/AIGenerationStudio/tools/comfy-native-apps/comfy_native_apps.mjs"],
+  "args": ["C:/path/to/comfy-native-apps/comfy_native_apps.mjs"],
   "env": { "COMFYUI_URL": "http://127.0.0.1:8188" }
 }
 ```
