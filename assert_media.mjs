@@ -1,9 +1,18 @@
 // assert_media.mjs — offline assertions for the media-port conversion fix.
 // No ComfyUI needed: pure loadNativeApp → buildOverrides → graphToPrompt checks.
 // Run: node assert_media.mjs
-import { loadNativeApp, buildOverrides, graphToPrompt } from './native_lib.mjs';
+import { loadNativeApp, buildOverrides, graphToPrompt, listApps } from './native_lib.mjs';
 
-const W = 'E:/AIGenerationStudio/ComfyUI/ComfyUI/user/default/workflows/图生图/';
+// Resolve workflow files by a stable id substring, so renaming an app file in the
+// user's workflows folder does not break this offline suite.
+const APPS = listApps().apps.filter((a) => !a.error);
+const appFile = (needle, avoid) => {
+  const hits = APPS.filter((a) => a.id.includes(needle) && (!avoid || !a.id.includes(avoid)));
+  if (!hits.length) throw new Error(`no app matching "${needle}"${avoid ? ` (avoid "${avoid}")` : ''}`);
+  return hits[0].file;
+};
+const fourInOne = () => appFile('控制生图四合一-krea2_turbo', 'LLMAPI');
+const krea2Angles = () => appFile('krea2Angles');
 let failed = 0;
 const check = (label, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}${ok ? '' : ' -> ' + JSON.stringify(got)}`);
@@ -13,7 +22,7 @@ const check = (label, ok, got) => {
 // 四合一: the linearData `image` port is the top-level LoadImage #140; its value
 // reaches the (hidden) shell `控制图` media feed through the shared loader node.
 {
-  const app = loadNativeApp(W + '控制生图四合一NSFW（不含提示词反推）-krea2_turbo.app.json');
+  const app = loadNativeApp(fourInOne());
   const p = app.inputs.find((i) => i.portName === 'image');
   check('krea2 linear image port media/feed/loader', p?.media && p.feed?.nodeId === 140 && p.loader?.nodeId === 140, p);
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'x.png' }));
@@ -24,7 +33,7 @@ const check = (label, ok, got) => {
 // controlnet: the linear `image` port targets LoadImage #58 directly; the bypassed
 // #62 skeleton still routes Canny #57 to the (hidden) shell feed internally.
 {
-  const app = loadNativeApp(W + '控制生图-z_image_turbo_controlnet-基于Comfy官方模板自制.app.json');
+  const app = loadNativeApp(appFile('控制生图-z_image_turbo_controlnet'));
   const p = app.inputs.find((i) => i.portName === 'image');
   check('controlnet linear image port loader is #58', p?.media && p.loader?.nodeId === 58, p);
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'y.png' }));
@@ -38,7 +47,7 @@ const check = (label, ok, got) => {
 // no loader. A value routed to a no-loader media port still spawns a synthetic
 // loader (exercises the same fallback through the shared media machinery).
 {
-  const app = loadNativeApp(W + '风格参考-krea2_style_ref-基于Comfy官方模板自制.app.json');
+  const app = loadNativeApp(appFile('风格参考-krea2_style_ref'));
   const p = app.inputs.find((i) => i.portName === 'image');
   const prompt = graphToPrompt(app, buildOverrides(app, { image: 'z.png' }));
   check('styleref linear image loader is #69', p?.media && p.loader?.nodeId === 69, p);
@@ -53,14 +62,14 @@ const check = (label, ok, got) => {
 
 // scalar ports keep their literal override behaviour.
 {
-  const app = loadNativeApp(W + '控制生图四合一NSFW（不含提示词反推）-krea2_turbo.app.json');
+  const app = loadNativeApp(fourInOne());
   const prompt = graphToPrompt(app, buildOverrides(app, { prompt: 'a cat' }));
   check('scalar string override still literal (alias "prompt")', Object.values(prompt).some((n) => n.class_type === 'CLIPTextEncode' && n.inputs.text === 'a cat'));
 }
 
 // linearData top-level ports route to their top-level node's widget.
 {
-  const app = loadNativeApp(W + '摄像机视角调整-krea2Angles-来自Github.app.json');
+  const app = loadNativeApp(krea2Angles());
   const prompt = graphToPrompt(app, buildOverrides(app, { yaw: 12.5, distance: 1.25, seed: -1 }));
   check('krea2Angles yaw lands on the camera node', prompt.t7?.inputs?.yaw === 12.5, prompt.t7);
   check('krea2Angles distance lands on the camera node', prompt.t7?.inputs?.distance === 1.25, prompt.t7);
@@ -70,7 +79,7 @@ const check = (label, ok, got) => {
 // linearMode port NAMES mirror the frontend: the target socket's
 // label ?? localized_name ?? name, not the linearData short key (which stays an alias).
 {
-  const app = loadNativeApp(W + '控制生图四合一NSFW（不含提示词反推）-krea2_turbo.app.json');
+  const app = loadNativeApp(fourInOne());
   const labels = app.inputs.map((i) => i.label);
   const want = ['图像', '使用原图分辨率生成', '自定义分辨率宽高比', '自定义分辨率百万像素', '自定义分辨率预览', '提示词',
     'loras.0.lora_name', 'loras.0.strength', 'loras.0.enabled', 'loras.1.lora_name', 'loras.1.strength', 'loras.1.enabled',
@@ -81,10 +90,25 @@ const check = (label, ok, got) => {
   check('krea2 Chinese labels route via aliases and media override', img?.media && buildOverrides(app, { 图像: 'x.png' }).has('@media:@lin:140:image'), img);
 }
 {
-  const app = loadNativeApp(W + '摄像机视角调整-krea2Angles-来自Github.app.json');
+  const app = loadNativeApp(krea2Angles());
   const seed = app.inputs.find((i) => i.label === '种子');
   check('krea2Angles localized label keeps old key as alias', seed?.aliases?.includes('seed'), seed);
   check('krea2Angles alias routes to the top node', buildOverrides(app, { seed: 3 }).has('@top:11:seed'), [...buildOverrides(app, { seed: 3 }).entries()]);
+}
+
+// Frontend-only nodes (Note / MarkdownNote / Reroute / PrimitiveNode) must never
+// reach the API prompt: ComfyUI rejects the WHOLE job with missing_node_type.
+{
+  const FE = /^(Note|MarkdownNote|Reroute|PrimitiveNode)$/;
+  const offenders = [];
+  for (const a of APPS) {
+    const app = loadNativeApp(a.file);
+    const prompt = graphToPrompt(app, buildOverrides(app, {}));
+    for (const [id, n] of Object.entries(prompt)) {
+      if (FE.test(String(n.class_type))) offenders.push(`${a.id}#${id}:${n.class_type}`);
+    }
+  }
+  check('no frontend-only node reaches the API prompt', offenders.length === 0, offenders);
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');

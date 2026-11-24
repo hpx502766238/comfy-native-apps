@@ -102,6 +102,13 @@ const loaderWidgetOf = (n) => {
   return w ? w.name : null;
 };
 
+// Frontend-only node types. They draw UI on the canvas (notes, reroutes, the
+// primitive-widget node) but have NO backend class_type — the web frontend strips
+// them right before submitting. If one reaches /prompt, ComfyUI rejects the WHOLE
+// job with `missing_node_type` ("Node 'Note' not found"). Skip them when converting.
+const FRONTEND_ONLY_NODE_TYPES = new Set(['Note', 'MarkdownNote', 'Reroute', 'PrimitiveNode']);
+const isFrontendOnly = (n) => !!n && FRONTEND_ONLY_NODE_TYPES.has(String(n.type));
+
 // --------------------------------------------------------------------------- #
 // Load a native app: extract the subgraph, its ports, and a link/node index.
 // --------------------------------------------------------------------------- #
@@ -527,6 +534,7 @@ export function graphToPrompt(app, overrides) {
   const prompt = {};
   for (const s of syntheticLoads) prompt[s.id] = { class_type: s.type, inputs: { [s.widget]: s.value } };
   for (const n of nodesById.values()) {
+    if (isFrontendOnly(n)) continue; // Note/MarkdownNote/Reroute/PrimitiveNode: no backend class_type
     const named = n.widgets_values_named ?? {};
     const inputs = {};
     for (const s of n.inputs ?? []) {
@@ -536,7 +544,8 @@ export function graphToPrompt(app, overrides) {
       if (ov !== undefined) { inputs[s.name] = ov; continue; }
       if (s.link != null) {
         const l = linksById.get(s.link);
-        if (l && l.origin_id !== shellIn && nodesById.has(l.origin_id)) {
+        const origin = l && l.origin_id !== shellIn ? nodesById.get(l.origin_id) : null;
+        if (origin && !isFrontendOnly(origin)) {
           // ComfyUI's API prompt uses STRING node ids, both as keys and as the
           // first element of a [node_id, slot] link reference.
           inputs[s.name] = [String(l.origin_id), l.origin_slot];
@@ -671,8 +680,14 @@ export function graphToPrompt(app, overrides) {
       const pr = out[src.slot];
       return pr ? [pr.key, pr.slot] : null;
     }
-    if (converted.has(src.nodeId)) return [topKey(src.nodeId), src.slot];
     const origin = topById.get(src.nodeId);
+    // A frontend-only node is never emitted; use its widget value if it is a
+    // primitive, otherwise the consumer keeps its own default (null link).
+    if (isFrontendOnly(origin)) {
+      const v = literalOf(origin);
+      return v !== null && v !== undefined ? v : null;
+    }
+    if (converted.has(src.nodeId)) return [topKey(src.nodeId), src.slot];
     const v = origin ? literalOf(origin) : null;
     return v !== null && v !== undefined ? v : null;
   };
@@ -694,9 +709,11 @@ export function graphToPrompt(app, overrides) {
     const out = [];
     for (let slot = 0; slot < (sg.outputs ?? []).length; slot++) {
       const l = sg.outputs[slot].linkIds?.[0] != null ? linkById.get(sg.outputs[slot].linkIds[0]) : undefined;
-      out[slot] = l && byId.has(l.origin_id) ? { key: prefix + l.origin_id, slot: l.origin_slot } : null;
+      const producer = l ? byId.get(l.origin_id) : undefined;
+      out[slot] = producer && !isFrontendOnly(producer) ? { key: prefix + l.origin_id, slot: l.origin_slot } : null;
     }
     for (const inn of sg.nodes ?? []) {
+      if (isFrontendOnly(inn)) continue; // frontend-only: no backend class_type
       const named = inn.widgets_values_named ?? {};
       const inputs = {};
       for (const s of inn.inputs ?? []) {
@@ -715,7 +732,7 @@ export function graphToPrompt(app, overrides) {
             const portName = refSock?.name ?? s.name;
             inputs[s.name] = portName in refWidgets ? asWidgetValue(refWidgets[portName]) : (s.name in named ? asWidgetValue(named[s.name]) : null);
           }
-        } else if (l && byId.has(l.origin_id)) {
+        } else if (l && byId.has(l.origin_id) && !isFrontendOnly(byId.get(l.origin_id))) {
           inputs[s.name] = [prefix + l.origin_id, l.origin_slot];
         } else {
           inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
@@ -776,6 +793,8 @@ export function graphToPrompt(app, overrides) {
   for (const id of new Set([...converted, ...nestedRefIds])) {
     const n = topById.get(id);
     if (!n) continue;
+    // Frontend-only (Note/MarkdownNote/Reroute/PrimitiveNode) has no backend type.
+    if (isFrontendOnly(n)) continue;
     // A nested ref is a shell: expand its subgraph, never emit the UUID class_type.
     if (nestedSubgraphOf(n)) { inlineNested(id); continue; }
     const named = widgetMapOf(n);
