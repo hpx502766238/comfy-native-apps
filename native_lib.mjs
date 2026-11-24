@@ -46,17 +46,89 @@ export const BASE = trimSlashes(
 export const RUN_TIMEOUT_S = Number(process.env.RUN_TIMEOUT_S ?? 300);
 
 // --------------------------------------------------------------------------- #
-// Workflows-root resolution. Native apps live under <comfyui user>/<user>/workflows/…
+// App discovery. Native apps live in ComfyUI's user dir, and the server exposes
+// that dir over HTTP (/userdata) — the same API the web frontend uses to list and
+// open workflows. Preferring it keeps the MCP free of local file access: it works
+// against a remote ComfyUI and needs no configured path.
+//
+// The API listing is mirrored into a temp dir so the (synchronous) converter can
+// read apps as files. WORKFLOWS_ROOT stays as an explicit override for setups
+// where /userdata is unavailable.
 // --------------------------------------------------------------------------- #
+const API_WORKFLOWS_DIR = 'workflows';
+const MIRROR_ROOT = path.join(os.tmpdir(), 'comfy-native-apps-mirror');
+const MIRROR_MANIFEST = path.join(MIRROR_ROOT, 'mirror.json');
 const ROOT_CANDIDATES = [
   path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'ComfyUI', 'resources', 'ComfyUI', 'user'),
   path.join(os.homedir(), 'Documents', 'ComfyUI', 'user'),
   path.join(os.homedir(), 'ComfyUI', 'user'),
 ];
+// A mirror written against a different server must not be trusted.
+function mirrorUsable() {
+  try { return JSON.parse(fs.readFileSync(MIRROR_MANIFEST, 'utf8')).base === BASE; } catch { return false; }
+}
 export function resolveWorkflowsRoot() {
   if (process.env.WORKFLOWS_ROOT) return process.env.WORKFLOWS_ROOT;
+  if (mirrorUsable()) return MIRROR_ROOT;
   for (const c of ROOT_CANDIDATES) if (fs.existsSync(c)) return c;
   return ROOT_CANDIDATES[0];
+}
+
+// Mirror <server>/userdata/workflows/**/*.app.json into MIRROR_ROOT. Returns the
+// app count, or null when the server does not serve /userdata (older build, or an
+// unreachable server) so callers can fall back to local discovery.
+export async function refreshApps({ maxAgeMs = 2000 } = {}) {
+  // An explicit local root means the caller wants those files, not the server's.
+  if (process.env.WORKFLOWS_ROOT) return null;
+  const now = Date.now();
+  if (maxAgeMs && refreshApps.cache && now - refreshApps.cache.at < maxAgeMs) return refreshApps.cache.value;
+  const value = await mirrorApps();
+  refreshApps.cache = { at: now, value };
+  return value;
+}
+
+async function mirrorApps() {
+  const listUrl = `${BASE}/userdata?dir=${API_WORKFLOWS_DIR}&recurse=true&full_info=true`;
+  let listed;
+  try {
+    const r = await fetch(listUrl, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    listed = await r.json();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(listed)) return null;
+  const wanted = listed.filter((e) => e && /\.app\.json$/i.test(String(e.path ?? '')));
+
+  let previous = {};
+  try { previous = JSON.parse(fs.readFileSync(MIRROR_MANIFEST, 'utf8')).files ?? {}; } catch { /* first run */ }
+
+  const files = {};
+  for (const e of wanted) {
+    const rel = String(e.path);
+    files[rel] = { size: e.size, modified: e.modified };
+    const dest = path.join(MIRROR_ROOT, API_WORKFLOWS_DIR, ...rel.split('/'));
+    const prev = previous[rel];
+    if (prev && prev.size === e.size && prev.modified === e.modified && fs.existsSync(dest)) continue;
+    try {
+      // The file route resolves against the user root, so keep the workflows/ prefix.
+      const r = await fetch(`${BASE}/userdata/${encodeURIComponent(`${API_WORKFLOWS_DIR}/${rel}`)}`, { signal: AbortSignal.timeout(30000) });
+      if (!r.ok) return null;
+      const json = await r.json();
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, JSON.stringify(json));
+    } catch {
+      return null;
+    }
+  }
+  // Drop apps that no longer exist on the server.
+  for (const rel of Object.keys(previous)) {
+    if (files[rel]) continue;
+    try { fs.rmSync(path.join(MIRROR_ROOT, API_WORKFLOWS_DIR, ...rel.split('/'))); } catch { /* already gone */ }
+  }
+  fs.mkdirSync(MIRROR_ROOT, { recursive: true });
+  fs.writeFileSync(MIRROR_MANIFEST, JSON.stringify({ base: BASE, at: Date.now(), files }));
+  return wanted.length;
 }
 
 // Recursively collect every workflows/**\/*.app.json under the user root (apps may
@@ -114,11 +186,19 @@ const isFrontendOnly = (n) => !!n && FRONTEND_ONLY_NODE_TYPES.has(String(n.type)
 // --------------------------------------------------------------------------- #
 export function loadNativeApp(file) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const sg = raw.definitions?.subgraphs?.[0];
-  if (!sg) throw new Error(`not a native app (no subgraph): ${file}`);
+  const sg = raw.definitions?.subgraphs?.[0] ?? null;
+  // A native app always wraps its graph in a subgraph. The one exception is a
+  // purely-linear app (frontend "linear" layout): subgraphs absent, but
+  // extra.linearMode + non-empty extra.linearData.inputs declare the whole
+  // TOP-LEVEL graph as its parameter surface, so the app is still a native app.
+  const linearOnly = !sg
+    && raw.extra?.linearMode === true
+    && Array.isArray(raw.extra?.linearData?.inputs)
+    && raw.extra?.linearData?.inputs.length > 0;
+  if (!sg && !linearOnly) throw new Error(`not a native app (no subgraph and no linear data): ${file}`);
 
-  const nodesById = new Map((sg.nodes ?? []).map((n) => [n.id, n]));
-  const linksById = new Map((sg.links ?? []).map((l) => [l.id, l]));
+  const nodesById = new Map((sg?.nodes ?? []).map((n) => [n.id, n]));
+  const linksById = new Map((sg?.links ?? []).map((l) => [l.id, l]));
 
   // Top-level graph: the subgraph REFERENCE node plus the output/saver nodes the
   // app author left outside the subgraph (SaveImage, VHS_VideoCombine, SaveVideo,
@@ -130,14 +210,14 @@ export function loadNativeApp(file) {
     : l);
   const topById = new Map(topNodes.map((n) => [n.id, n]));
   const topLinksById = new Map(topLinks.map((l) => [l.id, l]));
-  const shellIn = sg.inputNode?.id ?? -10;
+  const shellIn = sg?.inputNode?.id ?? -10;
   const nestedIds = new Set((raw.definitions?.subgraphs ?? []).map((s) => s.id));
 
   // The subgraph REFERENCE node (top-level node whose type is the subgraph's id)
   // holds the app's actual I/O values in its widgets, keyed by PORT NAME. This is
   // the authoritative value for each exposed input port — the internal node's own
   // widget (e.g. a UNETLoader's template default) may be stale/different.
-  const refNode = (raw.nodes ?? []).find((n) => n.type === sg.id);
+  const refNode = sg ? (raw.nodes ?? []).find((n) => n.type === sg.id) : null;
   const portValues = refNode?.widgets_values_named ?? {};
   const refInputs = refNode?.inputs ?? [];
 
@@ -246,7 +326,7 @@ export function loadNativeApp(file) {
       ...(ext ? { media: true, feed: ext.feed, chain: ext.chain, loader: ext.loader } : {}),
     };
   };
-  const shellInputs = (sg.inputs ?? [])
+  const shellInputs = (sg?.inputs ?? [])
     .filter((p) => !(p.linkIds ?? []).length || (p.linkIds ?? []).some((lid) => {
       const l = linksById.get(lid);
       const n = l ? nodesById.get(l.target_id) : undefined;
@@ -256,13 +336,15 @@ export function loadNativeApp(file) {
   // The EXPOSED port surface. In a linearMode app (extra.linearData.inputs) the
   // author hand-picks the parameters, one entry per ["<uuid>:<nodeId>:<socket>",
   // label]. Those subgraph shell ports that are NOT picked (e.g. a nested
-  // SeedVR2's seed/sampler/scheduler/denoise/...) are exactly what the linear
+  // subgraph's seed/sampler/scheduler/denoise/...) are exactly what the linear
   // frontend hides — so they must not appear here either. `shellInputs` (the full
   // derived list) is kept separately for graphToPrompt's media-link machinery.
+  // For a linearOnly app there is no subgraph: the linearData entries ARE the
+  // whole surface, every one being a port on a plain top-level node.
   let inputs = shellInputs;
   const ld = raw.extra?.linearData;
-  if (ld?.inputs?.length && refNode) {
-    const shellByName = new Map((sg.inputs ?? []).map((p) => [p.name, p]));
+  if (ld?.inputs?.length && (refNode || linearOnly)) {
+    const shellByName = new Map((sg?.inputs ?? []).map((p) => [p.name, p]));
     const used = new Set();
     // A linearMode port's NAME is whatever the frontend renders on the canvas: the
     // TARGET socket's `label ?? localized_name ?? socket name`. The linearData
@@ -280,7 +362,7 @@ export function loadNativeApp(file) {
       try { socket = decodeURIComponent(socket); } catch { /* keep verbatim */ }
       const n = topById.get(nodeId);
       if (!Number.isInteger(nodeId) || !socket || !n) continue;
-      let label = displayName(nodeId === refNode.id ? refNode : n, socket);
+      let label = displayName(nodeId === refNode?.id ? refNode : n, socket);
       if (used.has(label)) {
         let i = 2;
         while (used.has(`${label} (${i})`)) i++;
@@ -288,7 +370,7 @@ export function loadNativeApp(file) {
       }
       used.add(label);
       const oldLabel = rawLabel != null ? String(rawLabel) : socket;
-      if (nodeId === refNode.id) {
+      if (!linearOnly && nodeId === refNode.id) {
         // A socket on the main subgraph REF node = a subgraph input port. Adopt the
         // matching shell port wholesale so its internal targets, media feed and
         // default keep working (e.g. a ref-node scalar port, a `loras.*` port, or the
@@ -336,7 +418,7 @@ export function loadNativeApp(file) {
   // Branch nodes), so every link of the port must receive the value — the others
   // would otherwise fall back to their own stale saved widget.
   const portOverrides = new Map();
-  for (const p of sg.inputs ?? []) {
+  for (const p of sg?.inputs ?? []) {
     // Media ports never take a literal from the ref node widget: their value is a
     // filename owned by the top-level loader (see mediaFeed above).
     if (MEDIA_TYPES.has(p.type)) continue;
@@ -351,7 +433,7 @@ export function loadNativeApp(file) {
 
   // Exposed OUTPUT ports. A port's link is fed BY an internal node — record that
   // producer (node, slot) so we can attach a synthetic saver after conversion.
-  const outputs = (sg.outputs ?? []).map((p) => {
+  const outputs = (sg?.outputs ?? []).map((p) => {
     const link = p.linkIds?.[0] != null ? linksById.get(p.linkIds[0]) : undefined;
     const producer = link ? nodesById.get(link.origin_id) : undefined;
     return {
@@ -366,7 +448,7 @@ export function loadNativeApp(file) {
   return {
     file,
     id: path.relative(resolveWorkflowsRoot(), file).replace(/\.app\.json$/i, '').replace(/\\/g, '/'),
-    name: sg.name ?? path.basename(file, '.app.json'),
+    name: sg?.name ?? path.basename(file, '.app.json'),
     description: raw.extra?.description ?? '',
     shellIn,
     refNodeId: refNode ? refNode.id : null,
@@ -376,6 +458,9 @@ export function loadNativeApp(file) {
     // (graphToPrompt) instead of sending a UUID class_type.
     subgraphIds: [...nestedIds],
     subgraphs: raw.definitions?.subgraphs ?? [],
+    // True when the app was built in the frontend's "linear" layout: no subgraph,
+    // the whole top-level graph is the app and extra.linearData lists its ports.
+    linearOnly: !!linearOnly,
     nodesById,
     linksById,
     topNodes,
@@ -625,6 +710,12 @@ export function graphToPrompt(app, overrides) {
   for (const r of perPortReach) for (const id of r) allReach.add(id);
   // Downstream saver chain + upstream media-feed chain + overridden top widgets.
   const converted = new Set([...allReach, ...feedReach, ...topOverrideNodes]);
+  // A linear-layout app has no subgraph: the top-level graph IS the app, so every
+  // active top-level node is converted (mirroring how the frontend submits a linear
+  // workflow) instead of only the ref-node downstream chain.
+  if (app.linearOnly) {
+    for (const n of topNodes) if (isActive(n) && !isFrontendOnly(n)) converted.add(n.id);
+  }
 
   // Literal value of a helper node that stayed outside the converted set
   // (e.g. PrimitiveFloat -> VHS_VideoCombine.frame_rate). Only primitive-style

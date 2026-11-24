@@ -41,6 +41,8 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 
 一个 `.app.json` 把整张图包在单个 subgraph 里。本服务器从 `definitions.subgraphs[0].inputs[]` / `.outputs[]` 读取声明的输入输出（每个端口有 `label`、`type`，以及指向内部节点+控件的 `linkIds`）。然后把 subgraph 的 `nodes` + `links` 转换成 API 格式的 prompt：
 
+> **纯线性 app**（前端「线性」布局）没有 subgraph：整张顶层图就是 app 本体，靠 `extra.linearMode: true` 和 `extra.linearData.inputs`（每条 `"<uuid>:<nodeId>:<socket>"` + 标签）声明所有暴露端口。这类 app 同样会被识别并走同一套顶层机制转换——所有激活的顶层节点都会被发出，端口值路由到对应节点的控件——因此能像子图 app 一样用 `run_app` 驱动。
+
 - 从真实内部节点连出的 socket → `[String(nodeId), slot]`
 - 从 inputNode 外壳（`-10`）连出、或未连接的 socket → 其 `widgets_values_named` 默认值
 - 模型填的值 → 覆盖值（按端口声明类型做类型强转）
@@ -53,7 +55,18 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 
 **端口的真实值存在哪。** 在 app 模式下，暴露的输入端口的*已配置*值存放在 subgraph **引用节点**上——即那个 `type` 等于 subgraph id 的顶层节点——在其 `widgets_values_named` 里，以端口*名称*为键。内部节点（如 `UNETLoader`）保存的是模板的原始默认值，可能是过期的。本服务器从引用节点读取端口值，并把它们应用到该端口所填充的**每一个**内部节点+socket 上（作为预填的覆盖值），这样应用就能用用户真正设置的值运行——包括带子目录前缀的模型路径（例如 `zimage\z_image_turbo_int8_convrot.safetensors`）。一个端口可以扇出到多个节点（比如一个"通道"字符串同时驱动两个 `BranchNode`），它们都会收到这个值；用户的 `run_app` 值同样会扇出叠加。媒体端口是例外：它的值是文件，会被路由到加载器的文件名控件，而不是内部 `IMAGE` socket。
 
-因为转换发生在这里，同一个 `run_app` 无论 ComfyUI 是无头模式（`--front-end-version 0`，无 UI）还是跑着 Web 前端都能用——只碰核心 API。`.app.json` 文件直接从磁盘读取。
+因为转换发生在这里，同一个 `run_app` 无论 ComfyUI 是无头模式（`--front-end-version 0`，无 UI）还是跑着 Web 前端都能用——只碰核心 API。
+
+## App 发现
+
+app 直接来自 ComfyUI 服务器本身，走的是 Web 前端列出/打开工作流的那个 `/userdata` 接口：
+
+- `GET /userdata?dir=workflows&recurse=true&full_info=true` 列出所有工作流，
+- `GET /userdata/<整体 URL 编码的相对路径>` 取回文件内容。
+
+列表会镜像到临时目录供转换器按文件读取，只有内容变化的文件才会重新下载。因为发现走 HTTP，MCP 不需要任何本地磁盘访问：远程 ComfyUI 也能用，而且你在 ComfyUI 里新增/修改 app 后，下一次调用工具就会看到，无需重启。
+
+若服务器不提供 `/userdata`（旧版本），则回退到扫描本地 `<ComfyUI user>` 目录。
 
 ## 配置（环境变量）
 
@@ -61,7 +74,7 @@ artokun 的 comfyui-mcp 暴露了约 38 个带 action 参数的工具（外加 3
 |------|--------|------|
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | MCP 服务端访问 ComfyUI 的地址，如 `https://gpu.example.com/comfy` |
 | `COMFYUI_PUBLIC_URL` | 等于 `COMFYUI_URL` | 客户端访问 ComfyUI 的地址；仅当 MCP 主机能连、客户端连不上时（容器 / 反代 / 隧道）才需要设置，用于生成下载链接 |
-| `WORKFLOWS_ROOT` | 自动探测的 `<ComfyUI user>` 目录（递归找 `workflows/**\/*.app.json`） | ComfyUI `user` 目录 |
+| `WORKFLOWS_ROOT` | *(不设)* | 可选本地覆盖：从该目录读 `workflows/**/*.app.json` 代替服务器 API；普通情况不需要 |
 | `RUN_TIMEOUT_S` | `300`（等待一次渲染的秒数） | 单次渲染等待上限 |
 | `DOWNLOAD_DIR` | `<MCP 进程工作目录>/downloads` | `download_output` 未给 `dest` 时的落盘目录，可设成固定文件夹 |
 

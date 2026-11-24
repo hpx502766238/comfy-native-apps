@@ -62,6 +62,13 @@ I/O from `definitions.subgraphs[0].inputs[]` / `.outputs[]` (each port has a `la
 `type`, and a `linkIds` that points at the internal node+widget to fill). It then
 converts the subgraph's `nodes` + `links` to an API-format prompt:
 
+> A purely-linear app (frontend's "linear" layout) has **no subgraph**: the whole
+> top-level graph is the app, with `extra.linearMode: true` and
+> `extra.linearData.inputs` listing every exposed port (`"<uuid>:<nodeId>:<socket>"` +
+> label). Such apps are recognized and converted through the same top-level machinery —
+> every active top-level node is emitted and port values route to those nodes' widgets — so
+> they can be driven from `run_app` exactly like subgraph apps.
+
 - a socket linked from a real internal node → `[String(nodeId), slot]`
 - a socket linked from the inputNode shell (`-10`) or not linked → its `widgets_values_named` default
 - a model-filled value → the override (type-coerced to the port's declared type)
@@ -86,7 +93,23 @@ file, so it is routed to the loader's filename widget instead of the internal `I
 
 Because the conversion happens here, the same `run_app` works whether ComfyUI is
 headless (`--front-end-version 0`, no UI) or running the web frontend — only the core
-API is touched. The `.app.json` files are read straight off disk.
+API is touched.
+
+## App discovery
+
+Apps are read from the ComfyUI server itself, through the same `/userdata` API the
+web frontend uses to list and open workflows:
+
+- `GET /userdata?dir=workflows&recurse=true&full_info=true` lists every workflow,
+- `GET /userdata/<url-encoded path>` returns its JSON.
+
+The listing is mirrored into a temp dir so the converter can read apps as files, and
+only changed files are re-downloaded. Because discovery goes over HTTP, the MCP needs
+no local filesystem access: it works against a remote ComfyUI, and apps added or edited
+in ComfyUI appear on the next tool call without restarting the server.
+
+If the server does not expose `/userdata` (old builds), the MCP falls back to scanning
+a local `<ComfyUI user>` dir.
 
 ## Config (env vars)
 
@@ -94,7 +117,7 @@ API is touched. The `.app.json` files are read straight off disk.
 |-----|---------|-------|
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | address the MCP server uses to reach ComfyUI, e.g. `https://gpu.example.com/comfy` |
 | `COMFYUI_PUBLIC_URL` | same as `COMFYUI_URL` | address clients use; set it only when this MCP host can reach ComfyUI but clients cannot (container / reverse proxy / tunnel), so download links stay reachable |
-| `WORKFLOWS_ROOT` | auto-detected `<ComfyUI user>` dir | recursively finds `workflows/**\/*.app.json` |
+| `WORKFLOWS_ROOT` | *(unset)* | optional override: read `workflows/**/*.app.json` from this local dir instead of the server API |
 | `RUN_TIMEOUT_S` | `300` | seconds to wait for a render |
 | `DOWNLOAD_DIR` | `<MCP process cwd>/downloads` | where `download_output` writes when `dest` is omitted |
 

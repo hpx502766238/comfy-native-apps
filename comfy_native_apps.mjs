@@ -31,19 +31,20 @@
 //
 // Config (env vars): COMFYUI_URL (http://127.0.0.1:8188),
 //   COMFYUI_PUBLIC_URL (URL clients use for download links; defaults to
-//   COMFYUI_URL), WORKFLOWS_ROOT (auto-detected), RUN_TIMEOUT_S (300),
-//   DOWNLOAD_DIR (default <cwd>/downloads).
+//   COMFYUI_URL), WORKFLOWS_ROOT (optional local override of app discovery —
+//   by default apps are read from the server's /userdata API), RUN_TIMEOUT_S
+//   (300), DOWNLOAD_DIR (default <cwd>/downloads).
 //   Legacy COMFYUI_HOST + COMFYUI_PORT still work as a fallback.
 //
 // Client config (Claude Code / any MCP client):
 //   { "command": "node",
 //     "args": ["<path-to>/comfy-native-apps/comfy_native_apps.mjs"],
-//     "env": { "COMFYUI_URL": "http://127.0.0.1:8188",
-//              "WORKFLOWS_ROOT": "<ComfyUI user dir>" } }
+//     "env": { "COMFYUI_URL": "http://127.0.0.1:8188" } }
 import {
   BASE, RUN_TIMEOUT_S, appCatalog, appParams, resolveAppRef, loadNativeApp,
   graphToPrompt, buildOverrides, postPrompt, waitForJob, collectOutputs,
-  getQueue, jobStatus, jobPreview, postJson, uploadFile, downloadOutput,
+  getQueue, jobStatus, jobPreview, postJson, uploadFile, downloadOutput, refreshApps,
+  resolveWorkflowsRoot,
 } from './native_lib.mjs';
 
 const PROTOCOL_VERSION = '2024-11-05';
@@ -167,13 +168,17 @@ const TOOLS = [
 ];
 
 // --------------------------------------------------------------------------- #
-// Tool handlers.
+// Tool handlers. Each app-facing handler refreshes the catalog from the server
+// first (cheap: one /userdata listing, files re-downloaded only when they change),
+// so apps added or edited in ComfyUI show up without restarting the MCP.
 // --------------------------------------------------------------------------- #
-function listAppsHandler() {
+async function listAppsHandler() {
+  await refreshApps();
   return JSON.stringify(appCatalog(), null, 2);
 }
 
 async function appParamsHandler({ app }) {
+  await refreshApps();
   return JSON.stringify(await appParams(app), null, 2);
 }
 
@@ -193,6 +198,7 @@ async function downloadOutputHandler(args) {
 // here is the whole point: silently dropping them would run the app with its saved
 // defaults and return a plausible image the model takes for its own request.
 async function runAppHandler({ app, wait_s, inputs, ...stray }) {
+  await refreshApps();
   const ref = resolveAppRef(app);
   const a = loadNativeApp(ref.file);
   const labels = new Set(a.inputs.map((i) => String(i.label)));
@@ -291,7 +297,7 @@ function handle(msg) {
     const { name, arguments: args = {} } = params;
     const run = async () => {
       switch (name) {
-        case 'list_apps': return [{ type: 'text', text: listAppsHandler() }];
+        case 'list_apps': return [{ type: 'text', text: await listAppsHandler() }];
         case 'get_app_params': return [{ type: 'text', text: await appParamsHandler(args) }];
         case 'run_app': return runAppHandler(args);
         case 'upload_file': return uploadFileHandler(args);
@@ -331,6 +337,11 @@ function handle(msg) {
 
 function main() {
   process.stderr.write(`comfy-native-apps targeting ${BASE} (timeout ${RUN_TIMEOUT_S}s)\n`);
+  refreshApps({ maxAgeMs: 0 }).then((count) => {
+    process.stderr.write(count == null
+      ? `apps: /userdata unavailable, reading local files under ${resolveWorkflowsRoot()}\n`
+      : `apps: ${count} from ${BASE}/userdata\n`);
+  });
   let buf = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => {

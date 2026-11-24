@@ -28,6 +28,8 @@ node C:/path/to/comfy-native-apps/comfy_native_apps.mjs
 
 其余几个可选环境变量见 README:`COMFYUI_URL`、`COMFYUI_PUBLIC_URL`、`WORKFLOWS_ROOT`、`RUN_TIMEOUT_S`。旧的 `COMFYUI_HOST` + `COMFYUI_PORT` 仍兼容。
 
+> **app 发现**:服务启动后直接通过 ComfyUI 的 `/userdata` 接口（Web 前端加载/保存工作流用的同一接口）列目录并读取 `workflows/**/*.app.json`，不需要配置任何本地路径，远程 ComfyUI 也直接可用。`WORKFLOWS_ROOT` 仅在服务器不提供 `/userdata` 或你想强制读本地目录时才需要设置。
+
 ---
 
 ## 1) Claude Code
@@ -127,7 +129,7 @@ stdio,不支持 HTTP(sse/streamable)。如确有需要可提 issue。
 |------|------|------|
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | MCP 服务端访问 ComfyUI 的地址 |
 | `COMFYUI_PUBLIC_URL` | 同 `COMFYUI_URL` | 客户端可达的 ComfyUI 地址；MCP 主机能连、客户端连不上时（容器/反代/隧道）用于生成下载链接 |
-| `WORKFLOWS_ROOT` | 自动探测 | ComfyUI `user` 目录,递归找 `workflows` 下 `*.app.json` |
+| `WORKFLOWS_ROOT` | *(不设)* | 可选本地覆盖：从该目录读 `workflows/**/*.app.json` 代替服务器 API；普通情况下不需要 |
 | `RUN_TIMEOUT_S` | `300` | 单次渲染等待上限(秒) |
 | `DOWNLOAD_DIR` | `<MCP 进程 cwd>/downloads` | `download_output` 未给 `dest` 时的落盘目录 |
 
