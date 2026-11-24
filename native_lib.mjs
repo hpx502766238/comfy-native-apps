@@ -423,6 +423,14 @@ export function loadNativeApp(file) {
     // filename owned by the top-level loader (see mediaFeed above).
     if (MEDIA_TYPES.has(p.type)) continue;
     if (!(p.name in portValues)) continue;
+    // If the ref node's socket feeding this port is itself LINKED to a top-level
+    // computed node (resolution switch, controlnet-channel branch, …), the saved
+    // widget is a stale fallback — the real value is the top-level link. Skip the
+    // literal so the converter resolves the link instead (a stale 0 here is what
+    // made the output latent 0x0 and crashed the control-image encode with a
+    // division by zero).
+    const shellLink = (p.linkIds ?? []).map((id) => linksById.get(id)).find((l) => l && l.origin_id === shellIn);
+    if (shellLink && refNode?.inputs?.[shellLink.origin_slot]?.link != null) continue;
     for (const lid of p.linkIds ?? []) {
       const link = linksById.get(lid);
       if (!link) continue;
@@ -646,32 +654,11 @@ export function graphToPrompt(app, overrides) {
   }
   const prompt = {};
   for (const s of syntheticLoads) prompt[s.id] = { class_type: s.type, inputs: { [s.widget]: s.value } };
-  for (const n of nodesById.values()) {
-    if (isFrontendOnly(n)) continue; // Note/MarkdownNote/Reroute/PrimitiveNode: no backend class_type
-    const named = n.widgets_values_named ?? {};
-    const inputs = {};
-    for (const s of n.inputs ?? []) {
-      const ml = mediaLinks.get(`${n.id}:${s.name}`);
-      if (ml) { inputs[s.name] = ml; continue; }
-      const ov = eff.get(`${n.id}:${s.name}`);
-      if (ov !== undefined) { inputs[s.name] = ov; continue; }
-      if (s.link != null) {
-        const l = linksById.get(s.link);
-        const origin = l && l.origin_id !== shellIn ? nodesById.get(l.origin_id) : null;
-        if (origin && !isFrontendOnly(origin)) {
-          // ComfyUI's API prompt uses STRING node ids, both as keys and as the
-          // first element of a [node_id, slot] link reference.
-          inputs[s.name] = [String(l.origin_id), l.origin_slot];
-        } else {
-          inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
-        }
-      } else {
-        inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
-      }
-    }
-    for (const [k, v] of Object.entries(named)) if (!(k in inputs)) inputs[k] = asWidgetValue(v);
-    prompt[n.id] = { class_type: n.type, inputs };
-  }
+  // The main subgraph's internal nodes are converted below, after the top-level
+  // mechanism (resolveTopSource / inlineNested) is defined: a socket linked from the
+  // inputNode shell may itself be fed by a top-level node (a ComfySwitchNode picking
+  // the output resolution, a BranchNode for the controlnet channel, …), and that
+  // top-level link must be resolved rather than falling back to the stale saved widget.
 
   // ------------------------------------------------------------------------- #
   // Top-level output chain (THIS is what actually writes the file).
@@ -690,6 +677,7 @@ export function graphToPrompt(app, overrides) {
   const topById = new Map(topNodes.map((n) => [n.id, n]));
   const topLinksById = new Map(topLinks.map((l) => [l.id, l]));
   const nestedIds = new Set(app.subgraphIds ?? []);
+  const refNode = refId != null ? topById.get(refId) : null;
   // Bypassed nodes (mode 4) never reach the API prompt; follow their same-type
   // input to the real source so a consumer still gets a valid link.
   const resolveOrigin = (originId, originSlot) => {
@@ -738,6 +726,17 @@ export function graphToPrompt(app, overrides) {
   for (const r of perPortReach) for (const id of r) allReach.add(id);
   // Downstream saver chain + upstream media-feed chain + overridden top widgets.
   const converted = new Set([...allReach, ...feedReach, ...topOverrideNodes]);
+  // The ref node's input sockets that are LINKED to a top-level computed node (a
+  // ComfySwitchNode choosing the output resolution, a BranchNode for the controlnet
+  // channel, …) must be converted too: the subgraph's internal consumers resolve
+  // those shell links back to the top-level source, so dropping it collapses the
+  // switch to a literal and poisons the resolution chain (division by zero).
+  for (const s of refNode?.inputs ?? []) {
+    if (s.link == null) continue;
+    const tl = topLinksById.get(s.link);
+    const src = tl ? resolveOrigin(tl.origin_id, tl.origin_slot) : null;
+    if (src && src.nodeId !== refId && topById.has(src.nodeId)) converted.add(src.nodeId);
+  }
   // A linear-layout app has no subgraph: the top-level graph IS the app, so every
   // active top-level node is converted (mirroring how the frontend submits a linear
   // workflow) instead of only the ref-node downstream chain.
@@ -907,6 +906,50 @@ export function graphToPrompt(app, overrides) {
         enqueue(src.nodeId);
       }
     }
+  }
+
+  // Main subgraph internal nodes. Runs AFTER the upstream closure so a shell
+  // socket fed by a top-level computed node resolves to that node (in `converted`)
+  // rather than collapsing to a literal.
+  for (const n of nodesById.values()) {
+    if (isFrontendOnly(n)) continue; // Note/MarkdownNote/Reroute/PrimitiveNode: no backend class_type
+    const named = n.widgets_values_named ?? {};
+    const inputs = {};
+    for (const s of n.inputs ?? []) {
+      const ml = mediaLinks.get(`${n.id}:${s.name}`);
+      if (ml) { inputs[s.name] = ml; continue; }
+      const ov = eff.get(`${n.id}:${s.name}`);
+      if (ov !== undefined) { inputs[s.name] = ov; continue; }
+      if (s.link != null) {
+        const l = linksById.get(s.link);
+        const origin = l && l.origin_id !== shellIn ? nodesById.get(l.origin_id) : null;
+        if (origin && !isFrontendOnly(origin)) {
+          // ComfyUI's API prompt uses STRING node ids, both as keys and as the
+          // first element of a [node_id, slot] link reference.
+          inputs[s.name] = [String(l.origin_id), l.origin_slot];
+        } else if (l && l.origin_id === shellIn) {
+          // Exposed-input port: the shell link's origin_slot is the ref node's input
+          // slot. If that socket is itself linked, the real source is the top-level
+          // link off the ref node (a ComfySwitchNode picking the resolution, a
+          // BranchNode for the channel, …) — resolve it. If it is a plain widget,
+          // the ref node's own value is authoritative, else the internal default.
+          const refSock = refNode?.inputs?.[l.origin_slot];
+          const src = refSock?.link != null ? resolveTopSource(topLinksById.get(refSock.link)) : undefined;
+          if (src !== undefined) {
+            inputs[s.name] = src ?? (s.name in named ? asWidgetValue(named[s.name]) : null);
+          } else {
+            const portName = refSock?.name ?? s.name;
+            inputs[s.name] = portName in (app.portValues ?? {}) ? asWidgetValue(app.portValues[portName]) : (s.name in named ? asWidgetValue(named[s.name]) : null);
+          }
+        } else {
+          inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
+        }
+      } else {
+        inputs[s.name] = s.name in named ? asWidgetValue(named[s.name]) : null;
+      }
+    }
+    for (const [k, v] of Object.entries(named)) if (!(k in inputs)) inputs[k] = asWidgetValue(v);
+    prompt[n.id] = { class_type: n.type, inputs };
   }
 
   for (const id of new Set([...converted, ...nestedRefIds])) {
