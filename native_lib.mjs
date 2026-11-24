@@ -431,19 +431,47 @@ export function loadNativeApp(file) {
     }
   }
 
-  // Exposed OUTPUT ports. A port's link is fed BY an internal node — record that
-  // producer (node, slot) so we can attach a synthetic saver after conversion.
-  const outputs = (sg?.outputs ?? []).map((p) => {
-    const link = p.linkIds?.[0] != null ? linksById.get(p.linkIds[0]) : undefined;
-    const producer = link ? nodesById.get(link.origin_id) : undefined;
-    return {
-      name: p.label ?? p.localized_name ?? p.name,
-      type: p.type,
-      producerNodeId: producer ? producer.id : null,
-      producerSlot: producer ? link.origin_slot : 0,
-      producerType: producer ? producer.type : null,
-    };
-  });
+  // Exposed OUTPUT ports. A subgraph app's port is fed BY an internal node —
+  // record that producer (node, slot) so graphToPrompt can attach a synthetic
+  // saver when the app has no real top-level sink. A linear-layout app has no
+  // subgraph output ports: infer its outputs from the top-level sink nodes
+  // instead (SaveImage -> IMAGE, MeshToFile3D -> MESH, …), so the catalog and
+  // get_app_params still advertise what the app produces.
+  //
+  // Inferred sinks keep producerNodeId null: the real sink IS already converted
+  // as a top-level node, and a synthetic saver on top of it would double-save.
+  const SINK_TYPE_HINTS = {
+    VHS_VideoCombine: 'VIDEO', SaveAnimatedWEBM: 'ANIMATED', SaveAnimatedPNG: 'ANIMATED',
+    SaveImage: 'IMAGE', SaveImageAdvanced: 'IMAGE',
+    SaveAudio: 'AUDIO', SaveAudioMP3: 'AUDIO', SaveAudioOpus: 'AUDIO',
+    PreviewImage: 'IMAGE', PreviewAny: 'any', Preview3DAdvanced: 'MESH',
+    Save3DAdvanced: 'MESH', MeshToFile3D: 'MESH',
+  };
+  const SINK_NODE_RE = /^(VHS_VideoCombine|Save(Image|ImageAdvanced|Video|Audio|AudioMP3|AudioOpus|AnimatedWEBM|AnimatedPNG|3DAdvanced)|Preview(Image|Any|3DAdvanced)|MeshToFile3D|.*(Export|ToFile).*)/i;
+  const topSinkOutputs = () => {
+    const seen = new Map();
+    for (const n of topNodes) {
+      if (!(n.mode == null || n.mode === 0)) continue;
+      if (!SINK_NODE_RE.test(String(n.type ?? ''))) continue;
+      const sock = (n.inputs ?? []).find((i) => !/^(STRING|INT|FLOAT|BOOLEAN|COMBO|LATENT)$/i.test(String(i.type ?? '')));
+      const type = SINK_TYPE_HINTS[n.type] ?? sock?.type ?? 'IMAGE';
+      if (!seen.has(type)) seen.set(type, { name: type, type, producerNodeId: null, producerSlot: 0 });
+    }
+    return [...seen.values()];
+  };
+  const outputs = sg
+    ? (sg.outputs ?? []).map((p) => {
+      const link = p.linkIds?.[0] != null ? linksById.get(p.linkIds[0]) : undefined;
+      const producer = link ? nodesById.get(link.origin_id) : undefined;
+      return {
+        name: p.label ?? p.localized_name ?? p.name,
+        type: p.type,
+        producerNodeId: producer ? producer.id : null,
+        producerSlot: producer ? link.origin_slot : 0,
+        producerType: producer ? producer.type : null,
+      };
+    })
+    : topSinkOutputs();
 
   return {
     file,
