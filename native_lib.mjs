@@ -1146,7 +1146,23 @@ export async function appParams(ref) {
   await Promise.all([...nodeTypes].map(async (t) => {
     try { specs[t] = (await getJson(`/object_info/${encodeURIComponent(t)}`))[t]?.input; } catch { specs[t] = null; }
   }));
-  const socketSpec = (spec, socket) => spec?.required?.[socket] ?? spec?.optional?.[socket] ?? spec?.hidden?.[socket];
+  // Resolve a port socket to its object_info spec. Newer nodes expose a whole
+  // widget group as ONE socket (LoadLoraModel's `loras`, a COMFY_DYNAMICGROUP_V3
+  // whose widget list lives under `template`), while the frontend flattens it to
+  // `loras.0.lora_name`, `loras.0.strength`, … . The flat name is not a real
+  // socket, so also look inside the group's template by the trailing name —
+  // otherwise a LoRA picker's options never surface in get_app_params.
+  const socketSpec = (spec, socket) => {
+    const direct = spec?.required?.[socket] ?? spec?.optional?.[socket] ?? spec?.hidden?.[socket];
+    if (direct !== undefined) return direct;
+    if (!spec || !String(socket).includes('.')) return undefined;
+    const parts = String(socket).split('.');
+    const g = spec.required?.[parts[0]] ?? spec.optional?.[parts[0]] ?? spec.hidden?.[parts[0]];
+    if (!Array.isArray(g) || !g[1]?.template) return undefined;
+    // The middle numeric segments are just the repeated row index; the widget
+    // itself is named by the last segment (lora_name, strength, enabled, …).
+    return socketSpec(g[1].template, parts[parts.length - 1]);
+  };
   // object_info encodes a COMBO socket several ways:
   //   ["opt1","opt2"]            — bare list
   //   [["opt1","opt2"], {...}]   — options + meta dict
