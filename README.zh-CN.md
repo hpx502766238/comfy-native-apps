@@ -94,7 +94,7 @@ app 直接来自 ComfyUI 服务器本身，走的是 Web 前端列出/打开工�
 
 ## 文件
 
-- `comfy_native_apps.mjs` — MCP stdio 服务器（8 个工具，换行分隔的 JSON-RPC 2.0）
+- `comfy_native_apps.mjs` — MCP stdio 服务器（9 个工具，换行分隔的 JSON-RPC 2.0）
 - `native_lib.mjs` — 工作流发现、应用加载、UI→API 转换、HTTP、队列
 - `drive_safe.mjs` — 非破坏性端到端测试（list_apps + get_app_params + run_app + job_status）
 

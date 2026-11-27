@@ -137,7 +137,7 @@ Wired into this workspace's `.mcp.json` as the server `comfy-native-apps`.
 
 ## Files
 
-- `comfy_native_apps.mjs` — the MCP stdio server (8 tools, newline-delimited JSON-RPC 2.0)
+- `comfy_native_apps.mjs` — the MCP stdio server (9 tools, newline-delimited JSON-RPC 2.0)
 - `native_lib.mjs` — workflows discovery, app loading, UI→API conversion, HTTP, queue
 - `drive_safe.mjs` — non-destructive end-to-end test (list_apps + get_app_params + run_app + job_status)
 - `assert_media.mjs` — offline assertions for the media-port conversion (no ComfyUI needed): `node assert_media.mjs`
